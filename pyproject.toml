@@ -2,7 +2,7 @@
 name = "repl-nix-workspace"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<4"
 dependencies = [
     "aiohttp>=3.14.3",
     "eth-account>=0.14.0",
