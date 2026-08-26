@@ -15,6 +15,20 @@ import sys
 import time
 from typing import Any
 
+# CRITICAL: py_clob_client_v2's HTTP layer (http_helpers/helpers.py) builds a
+# single module-level httpx.Client() the moment it is imported. httpx only
+# reads HTTP_PROXY/HTTPS_PROXY from the environment at construction time, not
+# per-request. If the proxy env vars were set *after* this import (as
+# configured_client() used to do), every order request would silently go out
+# directly from this server's own IP instead of RESIDENTIAL_PROXY_URL -- with
+# no error, just a plain-looking rejection from Polymarket (e.g. a regional
+# block) that gives no hint the proxy was ever bypassed. Setting the env vars
+# here, before the import below, is required for the proxy to take effect.
+_proxy = os.environ.get("RESIDENTIAL_PROXY_URL", "").strip()
+if _proxy:
+    os.environ["HTTP_PROXY"] = _proxy
+    os.environ["HTTPS_PROXY"] = _proxy
+
 from py_clob_client_v2 import ClobClient, OrderArgsV2, OrderType, PostOrdersV2Args
 
 
