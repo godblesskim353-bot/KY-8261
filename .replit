@@ -1,0 +1,33 @@
+modules = ["nodejs-24", "python-base-3.13"]
+
+[deployment]
+router = "application"
+deploymentTarget = "vm"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+POLYMARKET_CONDITION_ID = "0x810f339f4113f877e2cc78c3f6a7cdc47e95933edbbaec6a987b4e6009cbfcc7"
+POLYMARKET_NO_TOKEN_ID = "30354929042309192835896411584686405671756082410502087706268041064163139144960"
+POLYMARKET_YES_TOKEN_ID = "90764308999051419098214787050884172263277651071901152766121968078449190153577"
+
+[userenv.development]
+LIVE_TRADING_ENABLED = "true"

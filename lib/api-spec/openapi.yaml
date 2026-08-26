@@ -1,0 +1,413 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: polymarket
+    description: Safety-gated Polymarket connectivity
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /polymarket/status:
+    get:
+      operationId: getPolymarketStatus
+      tags: [polymarket]
+      summary: Check live Polymarket connection configuration
+      responses:
+        "200":
+          description: Connection status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketStatus"
+  /polymarket/live:
+    get:
+      operationId: getPolymarketLiveSnapshot
+      tags: [polymarket]
+      summary: Read the latest server-observed Binance and Polymarket market snapshot
+      responses:
+        "200":
+          description: Read-only live market, account, and inventory snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketLiveSnapshot"
+  /polymarket/execution/stop:
+    post:
+      operationId: stopPolymarketExecution
+      tags: [polymarket]
+      summary: Activate the server-side two-leg execution kill switch
+      responses:
+        "200":
+          description: Execution has been halted and any tracked orders were cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketExecution"
+  /polymarket/execution/arm:
+    post:
+      operationId: armPolymarketExecution
+      tags: [polymarket]
+      summary: Arm automatic protected pair execution from the control room
+      responses:
+        "200":
+          description: Execution arm state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketExecution"
+  /polymarket/execution/pause:
+    post:
+      operationId: pausePolymarketExecution
+      tags: [polymarket]
+      summary: Pause automatic protected pair execution
+      responses:
+        "200":
+          description: Execution pause state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketExecution"
+  /polymarket/compound:
+    get:
+      operationId: getPolymarketCompound
+      tags: [polymarket]
+      summary: Calculate the final stake from wallet and market liquidity
+      parameters:
+        - name: commonDepth
+          in: query
+          required: true
+          description: Fresh common executable depth for the YES and NO asks, in shares
+          schema:
+            type: number
+            minimum: 0
+        - name: combinedAsk
+          in: query
+          required: true
+          description: The current YES plus NO best ask, in pUSD per protected pair
+          schema:
+            type: number
+            minimum: 0
+            maximum: 2
+      responses:
+        "200":
+          description: Current compound stake configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketCompound"
+        "400":
+          description: Missing or invalid market snapshot parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Invalid server balance configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /polymarket/opportunities:
+    get:
+      operationId: getPolymarketOpportunities
+      tags: [polymarket]
+      summary: List recent BTC pair opportunities the bot observed, whether or not a trade was executed
+      responses:
+        "200":
+          description: Opportunity occurrence log
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketOpportunityLog"
+  /polymarket/market:
+    get:
+      operationId: getPolymarketMarket
+      tags: [polymarket]
+      summary: Read current public market data through the configured proxy
+      parameters:
+        - name: conditionId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Market snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolymarketMarket"
+        "503":
+          description: Proxy or upstream unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    PolymarketStatus:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [MOCK, LIVE_READ_ONLY, LIVE_ARMED]
+        proxyConfigured:
+          type: boolean
+        proxyReachable:
+          type: boolean
+        credentialsConfigured:
+          type: boolean
+        liveTradingEnabled:
+          type: boolean
+        executionAvailable:
+          type: boolean
+        message:
+          type: string
+      required:
+        - mode
+        - proxyConfigured
+        - proxyReachable
+        - credentialsConfigured
+        - liveTradingEnabled
+        - executionAvailable
+        - message
+    PolymarketCompound:
+      type: object
+      properties:
+        walletMaxStakePusd:
+          type: number
+        commonDepthShares:
+          type: number
+        combinedAskPusd:
+          type: number
+        marketAvailableVolumePusd:
+          type: number
+        finalExecutionStakePusd:
+          type: number
+        executable:
+          type: boolean
+        executionReason:
+          type: string
+          enum: [WALLET_LIMIT, MARKET_LIQUIDITY_LIMIT, NO_EXECUTABLE_VOLUME]
+        balanceSource:
+          type: string
+          enum: [POLYMARKET_CLOB_COLLATERAL_BALANCE]
+        marketSource:
+          type: string
+          enum: [REQUEST_MARKET_SNAPSHOT]
+      required:
+        - walletMaxStakePusd
+        - commonDepthShares
+        - combinedAskPusd
+        - marketAvailableVolumePusd
+        - finalExecutionStakePusd
+        - executable
+        - executionReason
+        - balanceSource
+        - marketSource
+    PolymarketLiveSnapshot:
+      type: object
+      properties:
+        ready:
+          type: boolean
+        message:
+          type: string
+        sequence:
+          type: number
+          minimum: 0
+        serverTime:
+          type: string
+          format: date-time
+        market:
+          type: object
+          properties:
+            conditionId: { type: [string, "null"] }
+            yesTokenId: { type: [string, "null"] }
+            noTokenId: { type: [string, "null"] }
+            endAt: { type: [string, "null"], format: date-time }
+            configured: { type: boolean }
+            streamConnected: { type: boolean }
+            lastBookAt: { type: [string, "null"], format: date-time }
+          required: [conditionId, yesTokenId, noTokenId, endAt, configured, streamConnected, lastBookAt]
+        spot:
+          type: object
+          properties:
+            priceUsd: { type: [number, "null"] }
+            change60sPct: { type: [number, "null"] }
+            lastEventAt: { type: [string, "null"], format: date-time }
+            connected: { type: boolean }
+          required: [priceUsd, change60sPct, lastEventAt, connected]
+        quotes:
+          type: object
+          properties:
+            yesBestAsk: { type: [number, "null"] }
+            yesAskSize: { type: [number, "null"] }
+            yesAskLevels: { type: [number, "null"], minimum: 0 }
+            noBestAsk: { type: [number, "null"] }
+            noAskSize: { type: [number, "null"] }
+            noAskLevels: { type: [number, "null"], minimum: 0 }
+            combinedAsk: { type: [number, "null"] }
+            commonDepth: { type: [number, "null"] }
+            edge: { type: [number, "null"] }
+            fresh: { type: boolean }
+          required: [yesBestAsk, yesAskSize, yesAskLevels, noBestAsk, noAskSize, noAskLevels, combinedAsk, commonDepth, edge, fresh]
+        wallet:
+          type: object
+          properties:
+            balancePusd: { type: [number, "null"] }
+            source: { type: string }
+            lastUpdatedAt: { type: [string, "null"], format: date-time }
+          required: [balancePusd, source, lastUpdatedAt]
+        inventory:
+          type: object
+          properties:
+            yesShares: { type: [number, "null"] }
+            noShares: { type: [number, "null"] }
+            netShares: { type: [number, "null"] }
+            atRiskPusd: { type: [number, "null"] }
+            source: { type: string }
+            lastUpdatedAt: { type: [string, "null"], format: date-time }
+          required: [yesShares, noShares, netShares, atRiskPusd, source, lastUpdatedAt]
+        compound:
+          type: object
+          properties:
+            finalExecutionStakePusd: { type: [number, "null"] }
+            walletMaxStakePusd: { type: [number, "null"] }
+            marketAvailableVolumePusd: { type: [number, "null"] }
+            executable: { type: boolean }
+            reason: { type: string }
+          required: [finalExecutionStakePusd, walletMaxStakePusd, marketAvailableVolumePusd, executable, reason]
+        execution:
+          $ref: "#/components/schemas/PolymarketExecution"
+      required: [ready, message, sequence, serverTime, market, spot, quotes, wallet, inventory, compound, execution]
+    PolymarketExecution:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [CLOB_TWO_LEG_FOK]
+        enabled:
+          type: boolean
+        armed:
+          type: boolean
+        state:
+          type: string
+          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, FILLED, HALTED]
+        reason:
+          type: string
+        lastActionAt:
+          type: [string, "null"]
+          format: date-time
+        conditionId:
+          type: [string, "null"]
+        yesOrderId:
+          type: [string, "null"]
+        noOrderId:
+          type: [string, "null"]
+        unresolvedLeg:
+          type: boolean
+        plannedShares:
+          type: [number, "null"]
+        plannedCostPusd:
+          type: [number, "null"]
+      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, yesOrderId, noOrderId, unresolvedLeg, plannedShares, plannedCostPusd]
+    PolymarketOpportunityLog:
+      type: object
+      properties:
+        thresholdPusd:
+          type: number
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolymarketOpportunity"
+      required: [thresholdPusd, entries]
+    PolymarketOpportunity:
+      type: object
+      properties:
+        id: { type: string }
+        conditionId: { type: [string, "null"] }
+        openedAt: { type: string, format: date-time }
+        closedAt: { type: [string, "null"], format: date-time }
+        thresholdPusd: { type: number }
+        entryCombinedAskPusd: { type: number }
+        minCombinedAskPusd: { type: number }
+        yesBestAskAtOpen: { type: [number, "null"] }
+        noBestAskAtOpen: { type: [number, "null"] }
+        durationBelowThresholdMs: { type: number }
+        outcome:
+          type: string
+          enum: [OPEN, EXECUTED, NOT_EXECUTED]
+        reason: { type: [string, "null"] }
+        rejectionInference: { type: [string, "null"] }
+        shares: { type: [number, "null"] }
+        costPusd: { type: [number, "null"] }
+        yesOrderId: { type: [string, "null"] }
+        noOrderId: { type: [string, "null"] }
+      required:
+        - id
+        - conditionId
+        - openedAt
+        - closedAt
+        - thresholdPusd
+        - entryCombinedAskPusd
+        - minCombinedAskPusd
+        - yesBestAskAtOpen
+        - noBestAskAtOpen
+        - durationBelowThresholdMs
+        - outcome
+        - reason
+        - rejectionInference
+        - shares
+        - costPusd
+        - yesOrderId
+        - noOrderId
+    PolymarketMarket:
+      type: object
+      properties:
+        conditionId:
+          type: string
+        fetchedAt:
+          type: string
+          format: date-time
+        raw:
+          type: object
+          additionalProperties: true
+      required:
+        - conditionId
+        - fetchedAt
+        - raw
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+

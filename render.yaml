@@ -8,12 +8,11 @@ services:
     plan: starter
     region: frankfurt
     buildCommand: >-
-      corepack enable &&
-      pnpm install --frozen-lockfile &&
-      python3 -m pip install --user uv &&
-      $HOME/.local/bin/uv sync --frozen --no-dev &&
-      BASE_PATH=/ PORT=10000 pnpm --filter @workspace/polymarket-btc-dashboard run build &&
-      pnpm --filter @workspace/api-server run build
+      npx -y pnpm@10.26.1 install --frozen-lockfile &&
+      python3 -m pip install uv &&
+      uv sync --frozen --no-dev &&
+      BASE_PATH=/ PORT=10000 npx -y pnpm@10.26.1 --filter @workspace/polymarket-btc-dashboard run build &&
+      npx -y pnpm@10.26.1 --filter @workspace/api-server run build
     startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz
     envVars:

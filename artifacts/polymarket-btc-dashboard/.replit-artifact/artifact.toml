@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Polymarket BTC 5M Control Room"
+description = "A safety-first mock trading control room for monitoring BTC 5-minute market prices, two-leg arbitrage opportunities, inventory skew, proxy health, and hard kill-switch status."
+version = "1.0.0"
+id = "artifacts/polymarket-btc-dashboard"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20276
+
+[services.development]
+run = "pnpm --filter @workspace/polymarket-btc-dashboard run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/polymarket-btc-dashboard", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/polymarket-btc-dashboard/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20276"
+BASE_PATH = "/"
