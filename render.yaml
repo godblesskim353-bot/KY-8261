@@ -1,0 +1,45 @@
+# Render Blueprint for the BTC 5-minute two-leg arbitrage control room.
+# Use an always-on paid instance: CLOB WebSocket supervision and the in-memory
+# FOK order lifecycle must not sleep between requests.
+services:
+  - type: web
+    runtime: node
+    name: polymarket-btc-control-room
+    plan: starter
+    region: frankfurt
+    buildCommand: >-
+      corepack enable &&
+      pnpm install --frozen-lockfile &&
+      python3 -m pip install --user uv &&
+      $HOME/.local/bin/uv sync --frozen --no-dev &&
+      BASE_PATH=/ PORT=10000 pnpm --filter @workspace/polymarket-btc-dashboard run build &&
+      pnpm --filter @workspace/api-server run build
+    startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.13.0
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      - key: NODE_ENV
+        value: production
+      - key: SERVE_DASHBOARD
+        value: "true"
+      - key: POLYMARKET_EXECUTION_PYTHON
+        value: ./.venv/bin/python
+      - key: POLYMARKET_SIGNATURE_TYPE
+        value: "3"
+      # Keep execution off until all Render secrets, proxy routing, and the
+      # deployed order lifecycle have been independently checked. This is the
+      # server capability gate; the bot still starts PAUSED and requires the
+      # START AUTO EXECUTION button.
+      - key: LIVE_TRADING_ENABLED
+        value: "true"
+      - key: POLYMARKET_PRIVATE_KEY
+        sync: false
+      - key: POLYMARKET_FUNDER
+        sync: false
+      - key: RESIDENTIAL_PROXY_URL
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
