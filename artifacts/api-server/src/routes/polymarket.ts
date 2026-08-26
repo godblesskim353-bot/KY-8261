@@ -158,6 +158,26 @@ router.get("/polymarket/compound", (req, res) => {
   }
 });
 
+router.get("/polymarket/diagnostics/proxy-ip", async (_req, res) => {
+  try {
+    const response = await curlThroughProxy("https://ipapi.co/json");
+    const raw = JSON.parse(response) as Record<string, unknown>;
+    res.json({
+      ip: raw.ip ?? null,
+      country: raw.country_name ?? null,
+      countryCode: raw.country_code ?? null,
+      region: raw.region ?? null,
+    });
+  } catch (error) {
+    res.status(503).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "Could not determine the proxy's exit IP.",
+    });
+  }
+});
+
 router.get("/polymarket/market", async (req, res) => {
   const input = GetPolymarketMarketQueryParams.parse(req.query);
 
