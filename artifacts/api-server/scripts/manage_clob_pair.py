@@ -225,8 +225,18 @@ def main() -> None:
             get_orders(value)
         else:
             unavailable("INVALID_ACTION")
-    except Exception:
-        unavailable("CLOB_EXECUTION_UNAVAILABLE")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        # Classify the failure instead of swallowing it silently: the caller
+        # (automatic-pair-execution.ts) surfaces this in the operator-facing
+        # lifecycle reason, so a real bug (auth/proxy/signing/API rejection)
+        # is distinguishable from an expected FOK price-race loss. Only the
+        # exception type and a short message are emitted -- never raw
+        # request/response bodies, which could echo signed payloads.
+        detail = f"{type(exc).__name__}: {str(exc)[:160]}" if str(exc) else type(exc).__name__
+        emit({"ok": False, "code": "CLOB_EXECUTION_UNAVAILABLE", "detail": detail})
+        sys.exit(0)
 
 
 if __name__ == "__main__":

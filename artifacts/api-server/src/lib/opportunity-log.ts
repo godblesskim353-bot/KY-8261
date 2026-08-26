@@ -6,13 +6,15 @@ import type { AutomaticPairExecutionStatus, PairExecutionCandidate } from "./aut
  * supervisor already produces and records what it sees, so "no changes to
  * anything else" (existing arm/pause/edge/FOK logic) stays true.
  *
- * The 0.96 threshold below is intentionally looser than the live trading
- * gate (combined ask <= 0.99, see automatic-pair-execution.ts). It exists so
- * the operator can see opportunities the market presented -- whether or not
- * they were ever eligible to trade -- not just the ones that passed every
- * live-trading gate.
+ * This threshold matches the live trading gate's combined-ask ceiling
+ * (MAX_COMBINED_ASK in automatic-pair-execution.ts). It used to be a looser
+ * 0.96 "just for visibility," but that left every real submission attempt
+ * between 0.96 and 0.99 completely unlogged -- exactly the range where
+ * genuine FOK submissions were failing with no visible record of why. Keep
+ * this equal to MAX_COMBINED_ASK so every attempt the live gate would ever
+ * allow is also captured here.
  */
-export const OPPORTUNITY_LOG_THRESHOLD_PUSD = 0.96;
+export const OPPORTUNITY_LOG_THRESHOLD_PUSD = 0.99;
 
 const MAX_LOG_ENTRIES = 300;
 // Worst-case round trip for one submission attempt: the CLOB helper process

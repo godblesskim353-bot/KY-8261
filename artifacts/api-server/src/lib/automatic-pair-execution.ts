@@ -37,7 +37,7 @@ export type PairExecutionCandidate = {
 };
 
 type HelperOrder = { leg?: string; accepted?: boolean; orderId?: string | null };
-type HelperResult = { ok?: boolean; code?: string; orders?: HelperOrder[]; cancellationRequested?: boolean };
+type HelperResult = { ok?: boolean; code?: string; detail?: string; orders?: HelperOrder[]; cancellationRequested?: boolean };
 type OrderStatus = { orderId?: string; status?: string; sizeMatched?: number | string | null };
 type OrderStatusResult = { ok?: boolean; orders?: OrderStatus[] };
 
@@ -266,27 +266,29 @@ export class AutomaticPairExecutionSupervisor {
       this.status.noOrderId = orders.find((order) => order.leg === "NO")?.orderId ?? null;
       if (response.ok !== true || !this.status.yesOrderId || !this.status.noOrderId) {
         this.status.unresolvedLeg = Boolean(this.status.yesOrderId || this.status.noOrderId);
-        const cancelled = await this.cancelTrackedOrders("The FOK batch was not fully accepted.");
+        const detail = response.code ? ` (${[response.code, response.detail].filter(Boolean).join(": ")})` : "";
+        const cancelled = await this.cancelTrackedOrders(`The FOK batch was not fully accepted.${detail}`);
         if (cancelled) this.clearPair();
         this.scheduleCooldown(
           response.cancellationRequested
-            ? "One FOK leg was not accepted; cancellation was requested."
-            : "The FOK batch was not fully accepted.",
+            ? `One FOK leg was not accepted; cancellation was requested.${detail}`
+            : `The FOK batch was not fully accepted.${detail}`,
         );
         return;
       }
       this.inFlight = true;
       this.setState("VERIFYING", "Both FOK orders accepted; confirming matched lifecycle.");
       await this.reconcileIfDue(true);
-    } catch {
+    } catch (err) {
       this.status.unresolvedLeg = Boolean(this.status.yesOrderId || this.status.noOrderId);
+      const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
       if (this.status.unresolvedLeg) {
-        const cancelled = await this.cancelTrackedOrders("The protected CLOB batch could not be confirmed.");
+        const cancelled = await this.cancelTrackedOrders(`The protected CLOB batch could not be confirmed.${detail}`);
         if (cancelled) this.clearPair();
       } else {
         this.clearPair();
       }
-      this.scheduleCooldown("The protected CLOB batch could not be confirmed.");
+      this.scheduleCooldown(`The protected CLOB batch could not be confirmed.${detail}`);
     } finally {
       this.submitting = false;
     }
