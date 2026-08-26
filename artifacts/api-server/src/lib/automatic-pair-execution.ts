@@ -91,6 +91,14 @@ export class AutomaticPairExecutionSupervisor {
   private lastReconcileAt = 0;
   private completedConditionId: string | null = null;
   private retryAfterAt = 0;
+  // Set only by an operator action (pause/emergencyStop) during this process's
+  // lifetime. A fresh process (e.g. after a host restart or redeploy) always
+  // starts with this false, so evaluate() below re-arms automatically instead
+  // of sitting in PAUSED waiting for a manual START click. This trades the
+  // per-restart manual confirmation step for uptime: once LIVE_TRADING_ENABLED
+  // is on, the operator has already accepted 24/7 live execution, and a host
+  // restart should not silently stop the bot until someone notices.
+  private manuallyStopped = false;
 
   snapshot(): AutomaticPairExecutionStatus {
     return { ...this.status };
@@ -108,8 +116,13 @@ export class AutomaticPairExecutionSupervisor {
       return;
     }
     if (!this.status.armed) {
-      this.setState("PAUSED", "Press START AUTO EXECUTION to begin 24/7 automatic execution.");
-      return;
+      if (!this.manuallyStopped && isCLOBTwoLegBridgeAvailable()) {
+        this.status.armed = true;
+        this.setState("ARMED", "Automatically resumed protected-pair execution after a server restart.");
+      } else {
+        this.setState("PAUSED", "Press START AUTO EXECUTION to begin 24/7 automatic execution.");
+        return;
+      }
     }
     if (this.status.unresolvedLeg) {
       if (Date.now() < this.retryAfterAt) {
@@ -151,6 +164,7 @@ export class AutomaticPairExecutionSupervisor {
 
   async emergencyStop(): Promise<AutomaticPairExecutionStatus> {
     this.status.armed = false;
+    this.manuallyStopped = true;
     await this.cancelTrackedOrders("Operator kill switch is active.");
     this.setState("HALTED", "Operator kill switch is active.");
     return this.snapshot();
@@ -181,6 +195,7 @@ export class AutomaticPairExecutionSupervisor {
       this.setState("PAUSED", "CLOB two-leg execution bridge or credentials are unavailable.");
       return this.snapshot();
     }
+    this.manuallyStopped = false;
     this.status.armed = true;
     this.setState("ARMED", "Operator armed automatic protected-pair execution.");
     return this.snapshot();
@@ -188,6 +203,7 @@ export class AutomaticPairExecutionSupervisor {
 
   async pause(): Promise<AutomaticPairExecutionStatus> {
     this.status.armed = false;
+    this.manuallyStopped = true;
     const cancelled = await this.cancelTrackedOrders("Operator paused automatic execution.");
     if (!cancelled) {
       this.status.unresolvedLeg = true;
