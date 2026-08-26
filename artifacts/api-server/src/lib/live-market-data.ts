@@ -184,7 +184,12 @@ function isFresh(timestamp: number | null): boolean {
 }
 
 function clobBalancePython(): string | null {
-  const configured = process.env.POLYMARKET_BALANCE_PYTHON?.trim();
+  // POLYMARKET_BALANCE_PYTHON is the dedicated override; POLYMARKET_EXECUTION_PYTHON
+  // is accepted as a fallback because both must point at the same interpreter that
+  // has the Polymarket CLOB client installed (deployments only configure one var).
+  const configured =
+    process.env.POLYMARKET_BALANCE_PYTHON?.trim() ||
+    process.env.POLYMARKET_EXECUTION_PYTHON?.trim();
   const candidates = [
     configured,
     path.resolve(process.cwd(), ".pythonlibs/bin/python"),
