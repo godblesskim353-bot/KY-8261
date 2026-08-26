@@ -10,3 +10,6 @@ dependencies = [
     "py-clob-client-v2>=1.1.0",
     "web3>=7.16.0",
 ]
+
+[tool.uv]
+package = false
