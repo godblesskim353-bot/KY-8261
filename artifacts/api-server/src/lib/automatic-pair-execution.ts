@@ -27,6 +27,17 @@ export type AutomaticPairExecutionStatus = {
   unresolvedLeg: boolean;
   plannedShares: number | null;
   plannedCostPusd: number | null;
+  // Purely observational, does not affect any decision: records the last
+  // time the bot actually attempted a submission (blockReason === "READY"),
+  // the combined ask it attempted at, and the raw outcome/code/detail. This
+  // exists because the opportunity log only records entries below its own
+  // display threshold, and a fast market can pass READY for well under one
+  // poll interval -- this field is set synchronously by the same code path
+  // that submits, so it can never miss an attempt the way external polling
+  // or a threshold-gated log can.
+  lastAttemptAt: string | null;
+  lastAttemptCombinedAsk: number | null;
+  lastAttemptOutcome: string | null;
 };
 
 export type PairExecutionCandidate = {
@@ -84,6 +95,9 @@ export class AutomaticPairExecutionSupervisor {
     unresolvedLeg: false,
     plannedShares: null,
     plannedCostPusd: null,
+    lastAttemptAt: null,
+    lastAttemptCombinedAsk: null,
+    lastAttemptOutcome: null,
   };
   private submitting = false;
   private inFlight = false;
@@ -251,6 +265,8 @@ export class AutomaticPairExecutionSupervisor {
     this.status.conditionId = market.conditionId;
     this.status.plannedShares = shares;
     this.status.plannedCostPusd = Number((shares * (quotes.yesBestAsk + quotes.noBestAsk)).toFixed(2));
+    this.status.lastAttemptAt = new Date().toISOString();
+    this.status.lastAttemptCombinedAsk = Number((quotes.yesBestAsk + quotes.noBestAsk).toFixed(4));
     this.setState("SUBMITTING", "Submitting one FOK limit batch for the YES/NO pair.");
     try {
       const response = await this.callHelper("submit_pair", {
@@ -267,6 +283,7 @@ export class AutomaticPairExecutionSupervisor {
       if (response.ok !== true || !this.status.yesOrderId || !this.status.noOrderId) {
         this.status.unresolvedLeg = Boolean(this.status.yesOrderId || this.status.noOrderId);
         const detail = response.code ? ` (${[response.code, response.detail].filter(Boolean).join(": ")})` : "";
+        this.status.lastAttemptOutcome = `REJECTED${detail || " (no code returned)"}`;
         const cancelled = await this.cancelTrackedOrders(`The FOK batch was not fully accepted.${detail}`);
         if (cancelled) this.clearPair();
         this.scheduleCooldown(
@@ -276,12 +293,14 @@ export class AutomaticPairExecutionSupervisor {
         );
         return;
       }
+      this.status.lastAttemptOutcome = "ACCEPTED";
       this.inFlight = true;
       this.setState("VERIFYING", "Both FOK orders accepted; confirming matched lifecycle.");
       await this.reconcileIfDue(true);
     } catch (err) {
       this.status.unresolvedLeg = Boolean(this.status.yesOrderId || this.status.noOrderId);
       const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
+      this.status.lastAttemptOutcome = `EXCEPTION${detail || ""}`;
       if (this.status.unresolvedLeg) {
         const cancelled = await this.cancelTrackedOrders(`The protected CLOB batch could not be confirmed.${detail}`);
         if (cancelled) this.clearPair();
