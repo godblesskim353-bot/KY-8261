@@ -233,9 +233,108 @@ async function curlJsonThroughProxy(
 }
 
 /**
- * A narrow WebSocket client that performs an HTTP CONNECT through the configured
- * residential proxy. It supports the public CLOB market channel without adding
- * a dependency that could silently bypass the proxy.
+ * Performs a SOCKS5 handshake (RFC 1928, username/password auth per RFC 1929)
+ * on an already-connected raw socket, then calls onReady once the proxy has
+ * established a tunnel to target. Used when the configured residential proxy
+ * only speaks SOCKS5 (some proxy plans -- e.g. dedicated/static residential --
+ * do not offer an HTTP CONNECT port at all).
+ */
+function socksHandshake(
+  rawSocket: net.Socket,
+  proxy: URL,
+  target: URL,
+  onReady: () => void,
+  onError: (message: string) => void,
+) {
+  const username = proxy.username ? decodeURIComponent(proxy.username) : "";
+  const password = proxy.password ? decodeURIComponent(proxy.password) : "";
+  const useAuth = username.length > 0 || password.length > 0;
+  let stage: "greeting" | "auth" | "connect" = "greeting";
+  let buffer = Buffer.alloc(0);
+
+  function sendConnectRequest() {
+    const port = Number(target.port || 443);
+    const hostBuf = Buffer.from(target.hostname, "utf8");
+    stage = "connect";
+    rawSocket.write(
+      Buffer.concat([
+        Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
+        hostBuf,
+        Buffer.from([(port >> 8) & 0xff, port & 0xff]),
+      ]),
+    );
+  }
+
+  function pump() {
+    if (stage === "greeting") {
+      if (buffer.length < 2) return;
+      const version = buffer[0];
+      const method = buffer[1];
+      buffer = buffer.subarray(2);
+      if (version !== 0x05) return onError(`unexpected SOCKS version ${version}`);
+      if (method === 0xff) return onError("proxy rejected all authentication methods");
+      if (method === 0x02) {
+        stage = "auth";
+        const userBuf = Buffer.from(username, "utf8");
+        const passBuf = Buffer.from(password, "utf8");
+        rawSocket.write(
+          Buffer.concat([
+            Buffer.from([0x01, userBuf.length]),
+            userBuf,
+            Buffer.from([passBuf.length]),
+            passBuf,
+          ]),
+        );
+      } else {
+        sendConnectRequest();
+      }
+      return pump();
+    }
+    if (stage === "auth") {
+      if (buffer.length < 2) return;
+      const status = buffer[1];
+      buffer = buffer.subarray(2);
+      if (status !== 0x00) return onError("authentication failed");
+      sendConnectRequest();
+      return pump();
+    }
+    if (stage === "connect") {
+      if (buffer.length < 4) return;
+      const reply = buffer[1];
+      const addrType = buffer[3];
+      let addrLen: number;
+      if (addrType === 0x01) addrLen = 4;
+      else if (addrType === 0x04) addrLen = 16;
+      else if (addrType === 0x03) {
+        if (buffer.length < 5) return;
+        addrLen = 1 + buffer[4];
+      } else {
+        return onError(`unknown SOCKS address type ${addrType}`);
+      }
+      if (buffer.length < 4 + addrLen + 2) return;
+      if (reply !== 0x00) return onError(`CONNECT failed with code ${reply}`);
+      rawSocket.off("data", onData);
+      onReady();
+    }
+  }
+
+  function onData(chunk: Buffer) {
+    buffer = Buffer.concat([buffer, chunk]);
+    pump();
+  }
+
+  rawSocket.on("data", onData);
+  rawSocket.write(
+    useAuth ? Buffer.from([0x05, 0x02, 0x00, 0x02]) : Buffer.from([0x05, 0x01, 0x00]),
+  );
+}
+
+/**
+ * A narrow WebSocket client that tunnels through the configured residential
+ * proxy -- either via an HTTP CONNECT (http/https proxy URL) or a SOCKS5
+ * handshake (socks5/socks5h proxy URL) -- to reach the public CLOB/Binance
+ * market channels without adding a dependency that could silently bypass the
+ * proxy.
  */
 class ProxyWebSocket {
   private socket: tls.TLSSocket | null = null;
@@ -268,8 +367,9 @@ class ProxyWebSocket {
 
     const target = new URL(this.targetUrl);
     const proxy = new URL(this.proxy);
+    const isSocks = proxy.protocol === "socks5:" || proxy.protocol === "socks5h:";
     const proxyPort = Number(
-      proxy.port || (proxy.protocol === "https:" ? 443 : 80),
+      proxy.port || (proxy.protocol === "https:" ? 443 : isSocks ? 1080 : 80),
     );
     const rawSocket =
       proxy.protocol === "https:"
@@ -282,9 +382,38 @@ class ProxyWebSocket {
 
     const onRawError = (error: Error) => this.fail(error.message);
     rawSocket.once("error", onRawError);
+
+    const proceedToTarget = () => {
+      const secureSocket = tls.connect({
+        socket: rawSocket,
+        servername: target.hostname,
+      });
+      secureSocket.once("error", (error) => this.fail(error.message));
+      secureSocket.once("secureConnect", () => {
+        const key = randomBytes(16).toString("base64");
+        secureSocket.write(
+          `GET ${target.pathname}${target.search} HTTP/1.1\r\n` +
+            `Host: ${target.host}\r\n` +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            `Sec-WebSocket-Key: ${key}\r\n` +
+            "Sec-WebSocket-Version: 13\r\n\r\n",
+        );
+        this.awaitUpgrade(secureSocket);
+      });
+    };
+
     rawSocket.once(
       proxy.protocol === "https:" ? "secureConnect" : "connect",
       () => {
+        if (isSocks) {
+          socksHandshake(rawSocket, proxy, target, proceedToTarget, (message) => {
+            this.fail(`SOCKS5 CONNECT failed: ${message}`);
+            rawSocket.destroy();
+          });
+          return;
+        }
+
         const authorization =
           proxy.username || proxy.password
             ? `Proxy-Authorization: Basic ${Buffer.from(
@@ -313,24 +442,7 @@ class ProxyWebSocket {
             rawSocket.destroy();
             return;
           }
-
-          const secureSocket = tls.connect({
-            socket: rawSocket,
-            servername: target.hostname,
-          });
-          secureSocket.once("error", (error) => this.fail(error.message));
-          secureSocket.once("secureConnect", () => {
-            const key = randomBytes(16).toString("base64");
-            secureSocket.write(
-              `GET ${target.pathname}${target.search} HTTP/1.1\r\n` +
-                `Host: ${target.host}\r\n` +
-                "Upgrade: websocket\r\n" +
-                "Connection: Upgrade\r\n" +
-                `Sec-WebSocket-Key: ${key}\r\n` +
-                "Sec-WebSocket-Version: 13\r\n\r\n",
-            );
-            this.awaitUpgrade(secureSocket);
-          });
+          proceedToTarget();
         };
         rawSocket.on("data", readConnectResponse);
       },
