@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,9 @@ import { logger } from "./logger";
 const execFileAsync = promisify(execFile);
 const API_SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXECUTION_HELPER = path.resolve(API_SERVER_DIR, "scripts/manage_clob_pair.py");
+const EXECUTION_JOURNAL_PATH = process.env.POLYMARKET_EXECUTION_JOURNAL_PATH?.trim()
+  ? path.resolve(process.env.POLYMARKET_EXECUTION_JOURNAL_PATH.trim())
+  : path.resolve(API_SERVER_DIR, ".automatic-pair-execution-journal.json");
 const MIN_EDGE = 0.005;
 const MAX_COMBINED_ASK = 0.995;
 const RECONCILE_INTERVAL_MS = 500;
@@ -47,9 +50,66 @@ export type PairExecutionCandidate = {
 };
 
 type HelperOrder = { leg?: string; accepted?: boolean; orderId?: string | null };
-type HelperResult = { ok?: boolean; code?: string; detail?: string; orders?: HelperOrder[]; cancellationRequested?: boolean };
+type HelperResult = {
+  ok?: boolean;
+  code?: string;
+  detail?: string;
+  orders?: HelperOrder[];
+  cancellationRequested?: boolean;
+  noOrdersAccepted?: boolean;
+};
 type OrderStatus = { orderId?: string; status?: string; sizeMatched?: number | string | null };
 type OrderStatusResult = { ok?: boolean; code?: string; detail?: string; orders?: OrderStatus[] };
+type ExecutionJournal = {
+  phase: "SUBMITTING" | "ACKNOWLEDGED" | "UNCONFIRMED";
+  conditionId: string | null;
+  yesOrderId: string | null;
+  noOrderId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function loadExecutionJournal(): ExecutionJournal | null {
+  if (!existsSync(EXECUTION_JOURNAL_PATH)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(EXECUTION_JOURNAL_PATH, "utf8")) as Partial<ExecutionJournal>;
+    if (
+      !["SUBMITTING", "ACKNOWLEDGED", "UNCONFIRMED"].includes(String(parsed.phase)) ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.updatedAt !== "string"
+    ) {
+      throw new Error("Invalid execution journal");
+    }
+    return {
+      phase: parsed.phase as ExecutionJournal["phase"],
+      conditionId: typeof parsed.conditionId === "string" ? parsed.conditionId : null,
+      yesOrderId: typeof parsed.yesOrderId === "string" ? parsed.yesOrderId : null,
+      noOrderId: typeof parsed.noOrderId === "string" ? parsed.noOrderId : null,
+      createdAt: parsed.createdAt,
+      updatedAt: parsed.updatedAt,
+    };
+  } catch {
+    const timestamp = new Date(0).toISOString();
+    return {
+      phase: "UNCONFIRMED",
+      conditionId: null,
+      yesOrderId: null,
+      noOrderId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
+}
+
+function persistExecutionJournal(journal: ExecutionJournal): void {
+  const temporaryPath = `${EXECUTION_JOURNAL_PATH}.${process.pid}.tmp`;
+  writeFileSync(temporaryPath, JSON.stringify(journal), { encoding: "utf8", mode: 0o600 });
+  renameSync(temporaryPath, EXECUTION_JOURNAL_PATH);
+}
+
+function clearExecutionJournal(): void {
+  if (existsSync(EXECUTION_JOURNAL_PATH)) unlinkSync(EXECUTION_JOURNAL_PATH);
+}
 
 function executionPython(): string | null {
   const configured = process.env.POLYMARKET_EXECUTION_PYTHON?.trim();
@@ -75,7 +135,10 @@ function asIso(value: number): string {
 }
 
 function roundSharesDown(value: number): number {
-  return Math.floor((value + Number.EPSILON) * 100) / 100;
+  // Whole shares keep BUY maker amounts at cent precision when the market
+  // price uses the usual two-decimal tick. The Python bridge performs a final
+  // signed-order precision check before submitting either leg.
+  return Math.floor(value + Number.EPSILON);
 }
 
 function isFilled(status: string): boolean {
@@ -116,15 +179,19 @@ export class AutomaticPairExecutionSupervisor {
   private lastReconcileAt = 0;
   private completedConditionId: string | null = null;
   private retryAfterAt = 0;
-  // Set only by an operator action (pause/emergencyStop) during this process's
-  // lifetime. A fresh process (e.g. after a host restart or redeploy) always
-  // starts with this false, so evaluate() below re-arms automatically instead
-  // of sitting in PAUSED waiting for a manual START click. This trades the
-  // per-restart manual confirmation step for uptime: once LIVE_TRADING_ENABLED
-  // is on, the operator has already accepted 24/7 live execution, and a host
-  // restart should not silently stop the bot until someone notices.
-  private manuallyStopped = false;
 
+  constructor() {
+    const journal = loadExecutionJournal();
+    if (journal) {
+      this.status.state = "HALTED";
+      this.status.reason = `An unresolved execution journal (${journal.phase}) requires operator review before trading can resume.`;
+      this.status.unresolvedLeg = true;
+      this.status.conditionId = journal.conditionId;
+      this.status.yesOrderId = journal.yesOrderId;
+      this.status.noOrderId = journal.noOrderId;
+      this.status.lastActionAt = journal.updatedAt;
+    }
+  }
   snapshot(): AutomaticPairExecutionStatus {
     return { ...this.status };
   }
@@ -141,13 +208,8 @@ export class AutomaticPairExecutionSupervisor {
       return;
     }
     if (!this.status.armed) {
-      if (!this.manuallyStopped && isCLOBTwoLegBridgeAvailable()) {
-        this.status.armed = true;
-        this.setState("ARMED", "Automatically resumed protected-pair execution after a server restart.");
-      } else {
-        this.setState("PAUSED", "Press START AUTO EXECUTION to begin 24/7 automatic execution.");
-        return;
-      }
+      this.setState("PAUSED", "Press START AUTO EXECUTION to begin automatic execution.");
+      return;
     }
     if (this.status.unresolvedLeg) {
       if (Date.now() < this.retryAfterAt) {
@@ -189,7 +251,6 @@ export class AutomaticPairExecutionSupervisor {
 
   async emergencyStop(): Promise<AutomaticPairExecutionStatus> {
     this.status.armed = false;
-    this.manuallyStopped = true;
     await this.cancelTrackedOrders("Operator kill switch is active.");
     this.setState("HALTED", "Operator kill switch is active.");
     return this.snapshot();
@@ -220,7 +281,6 @@ export class AutomaticPairExecutionSupervisor {
       this.setState("PAUSED", "CLOB two-leg execution bridge or credentials are unavailable.");
       return this.snapshot();
     }
-    this.manuallyStopped = false;
     this.status.armed = true;
     this.setState("ARMED", "Operator armed automatic protected-pair execution.");
     return this.snapshot();
@@ -228,7 +288,6 @@ export class AutomaticPairExecutionSupervisor {
 
   async pause(): Promise<AutomaticPairExecutionStatus> {
     this.status.armed = false;
-    this.manuallyStopped = true;
     const cancelled = await this.cancelTrackedOrders("Operator paused automatic execution.");
     if (!cancelled) {
       this.status.unresolvedLeg = true;
@@ -279,6 +338,7 @@ export class AutomaticPairExecutionSupervisor {
     this.status.lastAttemptCombinedAsk = Number((quotes.yesBestAsk + quotes.noBestAsk).toFixed(4));
     this.setState("SUBMITTING", "Submitting one FOK limit batch for the YES/NO pair.");
     try {
+      this.recordExecutionJournal("SUBMITTING");
       const response = await this.callHelper("submit_pair", {
         yesTokenId: market.yesTokenId,
         noTokenId: market.noTokenId,
@@ -291,32 +351,47 @@ export class AutomaticPairExecutionSupervisor {
       this.status.noOrderId = orders.find((order) => order.leg === "NO")?.orderId ?? null;
       if (response.ok !== true || !this.status.yesOrderId || !this.status.noOrderId) {
         this.status.unresolvedLeg = Boolean(this.status.yesOrderId || this.status.noOrderId);
+        this.recordExecutionJournal("UNCONFIRMED");
         const detail = response.code ? ` (${[response.code, response.detail].filter(Boolean).join(": ")})` : "";
         this.status.lastAttemptOutcome = `REJECTED${detail || " (no code returned)"}`;
-        const cancelled = await this.cancelTrackedOrders(`The FOK batch was not fully accepted.${detail}`);
-        if (cancelled) this.clearPair();
+        const definitelyNoOrdersAccepted =
+          response.code === "PAIR_AMOUNT_PRECISION_INVALID" ||
+          response.noOrdersAccepted === true;
+        if (this.status.unresolvedLeg || !definitelyNoOrdersAccepted) {
+          await this.cancelTrackedOrders(`The FOK submission may have left an exposed leg.${detail}`);
+          this.status.armed = false;
+          this.status.unresolvedLeg = true;
+          this.retryAfterAt = 0;
+          this.setState(
+            "HALTED",
+            `One FOK leg may be exposed; automatic retries are disabled pending operator review.${detail}`,
+          );
+          return;
+        }
+        clearExecutionJournal();
+        this.clearPair();
         this.scheduleCooldown(
-          response.cancellationRequested
-            ? `One FOK leg was not accepted; cancellation was requested.${detail}`
-            : `The FOK batch was not fully accepted.${detail}`,
+          `The FOK batch was rejected before either leg was accepted.${detail}`,
         );
         return;
       }
       this.status.lastAttemptOutcome = "ACCEPTED";
+      this.recordExecutionJournal("ACKNOWLEDGED");
       this.inFlight = true;
       this.setState("VERIFYING", "Both FOK orders accepted; confirming matched lifecycle.");
       await this.reconcileIfDue(true);
     } catch (err) {
-      this.status.unresolvedLeg = Boolean(this.status.yesOrderId || this.status.noOrderId);
+      this.status.unresolvedLeg = true;
       const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
       this.status.lastAttemptOutcome = `EXCEPTION${detail || ""}`;
-      if (this.status.unresolvedLeg) {
-        const cancelled = await this.cancelTrackedOrders(`The protected CLOB batch could not be confirmed.${detail}`);
-        if (cancelled) this.clearPair();
-      } else {
-        this.clearPair();
-      }
-      this.scheduleCooldown(`The protected CLOB batch could not be confirmed.${detail}`);
+      await this.cancelTrackedOrders(`The protected CLOB batch could not be confirmed.${detail}`);
+      this.status.armed = false;
+      this.status.unresolvedLeg = true;
+      this.retryAfterAt = 0;
+      this.setState(
+        "HALTED",
+        `The protected CLOB batch could not be confirmed; automatic retries are disabled pending operator review.${detail}`,
+      );
     } finally {
       this.submitting = false;
     }
@@ -328,9 +403,9 @@ export class AutomaticPairExecutionSupervisor {
     if (orderIds.length !== 2) {
       this.status.unresolvedLeg = true;
       this.inFlight = false;
-      const cancelled = await this.cancelTrackedOrders("The two-leg lifecycle has an unresolved order identifier.");
-      if (cancelled) this.clearPair();
-      this.scheduleCooldown("The two-leg lifecycle has an unresolved order identifier.");
+      await this.cancelTrackedOrders("The two-leg lifecycle has an unresolved order identifier.");
+      this.status.armed = false;
+      this.setState("HALTED", "The two-leg lifecycle has an unresolved order identifier; operator review is required.");
       return;
     }
     this.lastReconcileAt = Date.now();
@@ -341,9 +416,11 @@ export class AutomaticPairExecutionSupervisor {
         const detail = response.code
           ? ` (${[response.code, response.detail].filter(Boolean).join(": ")})`
           : "";
-        const cancelled = await this.cancelTrackedOrders(`FOK lifecycle could not be confirmed${detail}.`);
-        if (cancelled) this.clearPair();
-        this.scheduleCooldown(`FOK lifecycle could not be confirmed${detail}.`);
+        await this.cancelTrackedOrders(`FOK lifecycle could not be confirmed${detail}.`);
+        this.status.armed = false;
+        this.status.unresolvedLeg = true;
+        this.retryAfterAt = 0;
+        this.setState("HALTED", `FOK lifecycle could not be confirmed; operator review is required${detail}.`);
         return;
       }
       const statuses = response.orders.map((order) => String(order.status ?? "UNKNOWN"));
@@ -352,20 +429,23 @@ export class AutomaticPairExecutionSupervisor {
         this.status.unresolvedLeg = false;
         this.retryAfterAt = 0;
         this.completedConditionId = this.status.conditionId;
+        clearExecutionJournal();
         this.setState("FILLED", "Both FOK legs fully filled. This BTC window is complete.");
         return;
       }
       this.status.unresolvedLeg = true;
       const detail = ` (statuses: ${statuses.join(", ")})`;
-      const cancelled = await this.cancelTrackedOrders(`A FOK leg did not produce a confirmed matching fill${detail}.`);
-      if (cancelled) this.clearPair();
-      this.scheduleCooldown(`A FOK leg did not produce a confirmed matching fill${detail}.`);
+      await this.cancelTrackedOrders(`A FOK leg did not produce a confirmed matching fill${detail}.`);
+      this.status.armed = false;
+      this.retryAfterAt = 0;
+      this.setState("HALTED", `A FOK leg did not produce a confirmed matching fill; operator review is required${detail}.`);
     } catch (err) {
       this.status.unresolvedLeg = true;
       const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
-      const cancelled = await this.cancelTrackedOrders("FOK lifecycle lookup failed.");
-      if (cancelled) this.clearPair();
-      this.scheduleCooldown(`FOK lifecycle lookup failed${detail}.`);
+      await this.cancelTrackedOrders("FOK lifecycle lookup failed.");
+      this.status.armed = false;
+      this.retryAfterAt = 0;
+      this.setState("HALTED", `FOK lifecycle lookup failed; operator review is required${detail}.`);
     }
   }
 
@@ -412,6 +492,19 @@ export class AutomaticPairExecutionSupervisor {
     this.status.unresolvedLeg = false;
     this.status.plannedShares = null;
     this.status.plannedCostPusd = null;
+  }
+
+  private recordExecutionJournal(phase: ExecutionJournal["phase"]): void {
+    const now = new Date().toISOString();
+    const existing = loadExecutionJournal();
+    persistExecutionJournal({
+      phase,
+      conditionId: this.status.conditionId,
+      yesOrderId: this.status.yesOrderId,
+      noOrderId: this.status.noOrderId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
   }
 
   private scheduleCooldown(reason: string): void {

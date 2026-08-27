@@ -31,6 +31,7 @@ node_modules
 /.sass-cache
 /connect.lock
 /coverage
+/artifacts/api-server/.automatic-pair-execution-journal.json
 /libpeerconnection.log
 npm-debug.log
 yarn-error.log

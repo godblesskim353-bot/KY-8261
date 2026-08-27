@@ -135,6 +135,17 @@ def accepted_order_id(response: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def valid_market_buy_amount_precision(order: object) -> bool:
+    try:
+        maker_amount = int(getattr(order, "makerAmount"))
+        taker_amount = int(getattr(order, "takerAmount"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    # Polymarket represents amounts with six token decimals. Market BUY orders
+    # allow at most two decimal places for maker USDC and four for taker shares.
+    return maker_amount % 10_000 == 0 and taker_amount % 100 == 0
+
+
 def submit_pair(value: dict[str, Any]) -> None:
     yes_token_id = required_string(value, "yesTokenId")
     no_token_id = required_string(value, "noTokenId")
@@ -167,6 +178,21 @@ def submit_pair(value: dict[str, Any]) -> None:
             )
         ),
     ]
+    if not all(valid_market_buy_amount_precision(order) for order in orders):
+        emit(
+            {
+                "ok": False,
+                "code": "PAIR_AMOUNT_PRECISION_INVALID",
+                "detail": "Both FOK legs must have maker amounts at cent precision and taker amounts at four-decimal precision.",
+                "orders": [
+                    {"leg": "YES", "accepted": False, "orderId": None},
+                    {"leg": "NO", "accepted": False, "orderId": None},
+                ],
+                "cancellationRequested": False,
+                "noOrdersAccepted": True,
+            }
+        )
+        return
     responses = client.post_orders(
         [
             PostOrdersV2Args(order=orders[0], orderType=OrderType.FOK),
@@ -181,6 +207,12 @@ def submit_pair(value: dict[str, Any]) -> None:
     order_ids = [accepted_order_id(response) for response in responses]
     accepted = [order_id for order_id in order_ids if order_id]
     fully_accepted = len(accepted) == 2
+    explicitly_rejected = all(
+        isinstance(response, dict)
+        and response.get("success") is False
+        and accepted_order_id(response) is None
+        for response in responses
+    )
     cancellation_requested = False
     if not fully_accepted and accepted:
         cancellation_requested = True
@@ -192,12 +224,19 @@ def submit_pair(value: dict[str, Any]) -> None:
     emit(
         {
             "ok": fully_accepted,
-            "code": "FOK_PAIR_ACCEPTED" if fully_accepted else "FOK_PAIR_UNCONFIRMED",
+            "code": (
+                "FOK_PAIR_ACCEPTED"
+                if fully_accepted
+                else "FOK_PAIR_REJECTED"
+                if explicitly_rejected
+                else "FOK_PAIR_UNCONFIRMED"
+            ),
             "orders": [
                 {"leg": "YES", "accepted": bool(order_ids[0]), "orderId": order_ids[0]},
                 {"leg": "NO", "accepted": bool(order_ids[1]), "orderId": order_ids[1]},
             ],
             "cancellationRequested": cancellation_requested,
+            "noOrdersAccepted": explicitly_rejected,
         }
     )
 
@@ -210,8 +249,28 @@ def cancel_orders(value: dict[str, Any]) -> None:
     if not order_ids:
         emit({"ok": True, "code": "NO_OPEN_ORDERS"})
         return
-    configured_client().cancel_orders(order_ids)
-    emit({"ok": True, "code": "CANCEL_REQUESTED", "orderIds": order_ids})
+    response = configured_client().cancel_orders(order_ids)
+    diagnostic_log("【取消訂單回傳結果】", response)
+    canceled = response.get("canceled") if isinstance(response, dict) else None
+    not_canceled = response.get("not_canceled") if isinstance(response, dict) else None
+    valid_canceled = isinstance(canceled, list) and all(
+        isinstance(order_id, str) for order_id in canceled
+    )
+    valid_not_canceled = isinstance(not_canceled, dict)
+    confirmed = (
+        valid_canceled
+        and valid_not_canceled
+        and all(order_id in canceled for order_id in dict.fromkeys(order_ids))
+        and len(not_canceled) == 0
+    )
+    emit(
+        {
+            "ok": confirmed,
+            "code": "CANCEL_CONFIRMED" if confirmed else "CANCEL_UNCONFIRMED",
+            "detail": None if confirmed else repr(response)[:300],
+            "orderIds": order_ids,
+        }
+    )
 
 
 def get_orders(value: dict[str, Any]) -> None:
