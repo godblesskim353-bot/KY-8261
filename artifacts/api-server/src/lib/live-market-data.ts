@@ -192,8 +192,14 @@ function clobBalancePython(): string | null {
     process.env.POLYMARKET_EXECUTION_PYTHON?.trim();
   const candidates = [
     configured,
+    // Replit/Nix workspaces install the uv-managed interpreter here.
     path.resolve(process.cwd(), ".pythonlibs/bin/python"),
     path.resolve(API_SERVER_DIR, "../../.pythonlibs/bin/python"),
+    // Plain `uv sync` (e.g. on a self-hosted VPS) creates a standard .venv instead.
+    path.resolve(process.cwd(), ".venv/bin/python3"),
+    path.resolve(process.cwd(), ".venv/bin/python"),
+    path.resolve(API_SERVER_DIR, "../../.venv/bin/python3"),
+    path.resolve(API_SERVER_DIR, "../../.venv/bin/python"),
   ].filter((value): value is string => Boolean(value));
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
