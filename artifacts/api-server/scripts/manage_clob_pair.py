@@ -142,11 +142,15 @@ def submit_pair(value: dict[str, Any]) -> None:
     yes_price = required_positive_number(value, "yesPrice")
     no_price = required_positive_number(value, "noPrice")
     size = required_positive_number(value, "size")
-    expiration = int(required_positive_number(value, "expiration"))
-    if expiration <= int(time.time()) + 5:
+    submission_deadline = int(required_positive_number(value, "expiration"))
+    if submission_deadline <= int(time.time()) + 5:
         unavailable("ORDER_EXPIRY_INVALID")
 
     client = configured_client()
+    # FOK is a non-GTD order type. Polymarket rejects any non-zero expiration
+    # for non-GTD orders, while the local submission deadline above still
+    # prevents this pair from being attempted near the market's tail cutoff.
+    fok_expiration = 0
     orders = [
         client.create_order(
             OrderArgsV2(
@@ -154,7 +158,7 @@ def submit_pair(value: dict[str, Any]) -> None:
                 price=yes_price,
                 size=size,
                 side="BUY",
-                expiration=expiration,
+                expiration=fok_expiration,
             )
         ),
         client.create_order(
@@ -163,7 +167,7 @@ def submit_pair(value: dict[str, Any]) -> None:
                 price=no_price,
                 size=size,
                 side="BUY",
-                expiration=expiration,
+                expiration=fok_expiration,
             )
         ),
     ]
