@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { PolymarketExecutionMode } from './polymarketExecutionMode';
+import type { PolymarketExecutionSide } from './polymarketExecutionSide';
 import type { PolymarketExecutionState } from './polymarketExecutionState';
 
 export interface PolymarketExecution {
@@ -19,18 +20,35 @@ export interface PolymarketExecution {
   /** @nullable */
   conditionId: string | null;
   /** @nullable */
-  yesOrderId: string | null;
+  side: PolymarketExecutionSide;
   /** @nullable */
-  noOrderId: string | null;
-  unresolvedLeg: boolean;
+  entryOrderId: string | null;
+  /** @nullable */
+  exitOrderId: string | null;
+  unresolvedOrder: boolean;
   /** @nullable */
   plannedShares: number | null;
   /** @nullable */
   plannedCostPusd: number | null;
   /** @nullable */
-  recoveryAction: string | null;
+  entryPricePusd: number | null;
   /** @nullable */
-  recoveryOrderId: string | null;
+  takeProfitPricePusd: number | null;
   /** @nullable */
-  mergeTxHash: string | null;
+  remainingShares: number | null;
+  /** @nullable */
+  exitSellFloorPusd: number | null;
+  exitTriggered: boolean;
+  /** @nullable */
+  directionReason: string | null;
+  /** @nullable */
+  entryCombinedAskPusd: number | null;
+  /** @nullable */
+  lastExitError: string | null;
+  /** @nullable */
+  lastAttemptAt: Date | null;
+  /** @nullable */
+  lastAttemptCombinedAsk: number | null;
+  /** @nullable */
+  lastAttemptOutcome: string | null;
 }

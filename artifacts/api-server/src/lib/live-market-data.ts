@@ -10,6 +10,7 @@ import { logger } from "./logger";
 import { calculateFinalExecutionStake } from "./compound";
 import {
   AutomaticPairExecutionSupervisor,
+  type Direction,
   type AutomaticPairExecutionStatus,
   type PairExecutionCandidate,
 } from "./automatic-pair-execution";
@@ -33,6 +34,11 @@ const CLOB_BALANCE_HELPER = path.resolve(
 );
 
 type BookLevel = { price: number; size: number };
+type TokenBook = {
+  bids: Map<number, number>;
+  asks: Map<number, number>;
+  updatedAt: number;
+};
 type Position = { size: number | null; value: number | null };
 type ActiveMarket = {
   conditionId: string | null;
@@ -67,13 +73,30 @@ export type LiveMarketSnapshot = {
     yesBestAsk: number | null;
     yesAskSize: number | null;
     yesAskLevels: number | null;
+    yesBestBid: number | null;
+    yesBidSize: number | null;
+    yesBidLevels: number | null;
     noBestAsk: number | null;
     noAskSize: number | null;
     noAskLevels: number | null;
+    noBestBid: number | null;
+    noBidSize: number | null;
+    noBidLevels: number | null;
     combinedAsk: number | null;
     commonDepth: number | null;
     edge: number | null;
+    yesBidDepth: number | null;
+    yesAskDepth: number | null;
+    noBidDepth: number | null;
+    noAskDepth: number | null;
     fresh: boolean;
+  };
+  signal: {
+    btcDirection: Direction | null;
+    bookDirection: Direction | null;
+    selectedDirection: Direction | null;
+    confirmed: boolean;
+    reason: string;
   };
   wallet: {
     balancePusd: number | null;
@@ -579,7 +602,7 @@ class LiveMarketDataSupervisor {
   private spot: number | null = null;
   private spotAt: number | null = null;
   private spotHistory: Array<{ price: number; at: number }> = [];
-  private books = new Map<string, Map<number, number>>();
+  private books = new Map<string, TokenBook>();
   private clobConnected = false;
   private clobAt: number | null = null;
   private marketError: string | null = null;
@@ -614,9 +637,13 @@ class LiveMarketDataSupervisor {
     const market = this.activeMarket;
     const yes = market.yesTokenId ? this.bestAsk(market.yesTokenId) : null;
     const no = market.noTokenId ? this.bestAsk(market.noTokenId) : null;
+    const yesBid = market.yesTokenId ? this.bestBid(market.yesTokenId) : null;
+    const noBid = market.noTokenId ? this.bestBid(market.noTokenId) : null;
     const quotesFresh = Boolean(
       yes &&
         no &&
+        yesBid &&
+        noBid &&
         isFresh(this.clobAt) &&
         isFresh(this.spotAt),
     );
@@ -630,6 +657,7 @@ class LiveMarketDataSupervisor {
       this.spot !== null && spotWindow && spotWindow.price > 0
         ? ((this.spot - spotWindow.price) / spotWindow.price) * 100
         : null;
+    const signal = this.directionSignal(change60sPct);
     const balance = this.wallet.balancePusd;
     const compound =
       balance !== null && commonDepth !== null && yes && no && quotesFresh
@@ -675,15 +703,26 @@ class LiveMarketDataSupervisor {
       quotes: {
         yesBestAsk: yes?.price ?? null,
         yesAskSize: yes?.size ?? null,
-        yesAskLevels: market.yesTokenId ? (this.books.get(market.yesTokenId)?.size ?? null) : null,
+        yesAskLevels: market.yesTokenId ? (this.books.get(market.yesTokenId)?.asks.size ?? null) : null,
+        yesBestBid: yesBid?.price ?? null,
+        yesBidSize: yesBid?.size ?? null,
+        yesBidLevels: market.yesTokenId ? (this.books.get(market.yesTokenId)?.bids.size ?? null) : null,
         noBestAsk: no?.price ?? null,
         noAskSize: no?.size ?? null,
-        noAskLevels: market.noTokenId ? (this.books.get(market.noTokenId)?.size ?? null) : null,
+        noAskLevels: market.noTokenId ? (this.books.get(market.noTokenId)?.asks.size ?? null) : null,
+        noBestBid: noBid?.price ?? null,
+        noBidSize: noBid?.size ?? null,
+        noBidLevels: market.noTokenId ? (this.books.get(market.noTokenId)?.bids.size ?? null) : null,
         combinedAsk,
         commonDepth,
         edge,
+        yesBidDepth: market.yesTokenId ? this.nearDepth(market.yesTokenId, "BID") : null,
+        yesAskDepth: market.yesTokenId ? this.nearDepth(market.yesTokenId, "ASK") : null,
+        noBidDepth: market.noTokenId ? this.nearDepth(market.noTokenId, "BID") : null,
+        noAskDepth: market.noTokenId ? this.nearDepth(market.noTokenId, "ASK") : null,
         fresh: quotesFresh,
       },
+      signal,
       wallet: {
         balancePusd: this.wallet.balancePusd,
         source: this.wallet.source,
@@ -731,8 +770,15 @@ class LiveMarketDataSupervisor {
     const market = this.activeMarket;
     const yes = market.yesTokenId ? this.bestAsk(market.yesTokenId) : null;
     const no = market.noTokenId ? this.bestAsk(market.noTokenId) : null;
+    const yesBid = market.yesTokenId ? this.bestBid(market.yesTokenId) : null;
+    const noBid = market.noTokenId ? this.bestBid(market.noTokenId) : null;
+    const spotWindow = this.spotHistory.find((point) => point.at >= Date.now() - 60_000);
+    const change60sPct =
+      this.spot !== null && spotWindow && spotWindow.price > 0
+        ? ((this.spot - spotWindow.price) / spotWindow.price) * 100
+        : null;
     const fresh =
-      Boolean(yes && no) &&
+      Boolean(yes && no && yesBid && noBid) &&
       this.clobConnected &&
       isFresh(this.clobAt) &&
       isFresh(this.spotAt);
@@ -747,11 +793,26 @@ class LiveMarketDataSupervisor {
       },
       quotes: {
         yesBestAsk: yes?.price ?? null,
+        yesAskSize: yes?.size ?? null,
         noBestAsk: no?.price ?? null,
-        commonDepth: yes && no ? Math.min(yes.size, no.size) : null,
+        noAskSize: no?.size ?? null,
+        yesBestBid: yesBid?.price ?? null,
+        yesBidSize: yesBid?.size ?? null,
+        noBestBid: noBid?.price ?? null,
+        noBidSize: noBid?.size ?? null,
+        yesBidDepth: market.yesTokenId ? this.nearDepth(market.yesTokenId, "BID") : null,
+        yesAskDepth: market.yesTokenId ? this.nearDepth(market.yesTokenId, "ASK") : null,
+        noBidDepth: market.noTokenId ? this.nearDepth(market.noTokenId, "BID") : null,
+        noAskDepth: market.noTokenId ? this.nearDepth(market.noTokenId, "ASK") : null,
+        combinedAsk: yes && no ? yes.price + no.price : null,
         fresh,
       },
+      signal: this.directionSignal(change60sPct),
       walletBalancePusd: this.wallet.balancePusd,
+      inventory: {
+        yesShares: this.inventory.yes,
+        noShares: this.inventory.no,
+      },
     };
   }
 
@@ -898,13 +959,17 @@ class LiveMarketDataSupervisor {
         const tokenId =
           stringOrNull(payload.tokenId) ?? stringOrNull(payload.asset_id);
         if (!tokenId) return;
-        const asks = Array.isArray(payload.asks) ? payload.asks : [];
-        const levels = new Map<number, number>();
-        for (const item of asks) {
+        const asks = new Map<number, number>();
+        for (const item of Array.isArray(payload.asks) ? payload.asks : []) {
           const level = this.parseLevel(item);
-          if (level && level.size > 0) levels.set(level.price, level.size);
+          if (level && level.size > 0) asks.set(level.price, level.size);
         }
-        this.books.set(tokenId, levels);
+        const bids = new Map<number, number>();
+        for (const item of Array.isArray(payload.bids) ? payload.bids : []) {
+          const level = this.parseLevel(item);
+          if (level && level.size > 0) bids.set(level.price, level.size);
+        }
+        this.books.set(tokenId, { bids, asks, updatedAt: Date.now() });
         this.clobAt = Date.now();
         this.sequence += 1;
         void this.execution.evaluate(this.executionCandidate());
@@ -919,15 +984,21 @@ class LiveMarketDataSupervisor {
           if (!change || typeof change !== "object") continue;
           const record = change as Record<string, unknown>;
           const side = String(record.side ?? "").toUpperCase();
-          if (side !== "SELL" && side !== "ASK") continue;
+          if (!["BUY", "BID", "SELL", "ASK"].includes(side)) continue;
           const tokenId =
             stringOrNull(record.tokenId) ?? stringOrNull(record.asset_id);
           const level = this.parseLevel(record);
           if (!tokenId || !level) continue;
-          const asks = this.books.get(tokenId) ?? new Map<number, number>();
-          if (level.size <= 0) asks.delete(level.price);
-          else asks.set(level.price, level.size);
-          this.books.set(tokenId, asks);
+          const book = this.books.get(tokenId) ?? {
+            bids: new Map<number, number>(),
+            asks: new Map<number, number>(),
+            updatedAt: Date.now(),
+          };
+          const levels = side === "BUY" || side === "BID" ? book.bids : book.asks;
+          if (level.size <= 0) levels.delete(level.price);
+          else levels.set(level.price, level.size);
+          book.updatedAt = Date.now();
+          this.books.set(tokenId, book);
         }
         this.clobAt = Date.now();
         this.sequence += 1;
@@ -954,13 +1025,109 @@ class LiveMarketDataSupervisor {
   }
 
   private bestAsk(tokenId: string): BookLevel | null {
-    const asks = this.books.get(tokenId);
-    if (!asks || !asks.size) return null;
+    const asks = this.books.get(tokenId)?.asks;
+    if (!asks?.size) return null;
     let best: BookLevel | null = null;
     for (const [price, size] of asks) {
       if (size > 0 && (best === null || price < best.price)) best = { price, size };
     }
     return best;
+  }
+
+  private bestBid(tokenId: string): BookLevel | null {
+    const bids = this.books.get(tokenId)?.bids;
+    if (!bids?.size) return null;
+    let best: BookLevel | null = null;
+    for (const [price, size] of bids) {
+      if (size > 0 && (best === null || price > best.price)) best = { price, size };
+    }
+    return best;
+  }
+
+  private nearDepth(tokenId: string, side: "BID" | "ASK"): number | null {
+    const book = this.books.get(tokenId);
+    if (!book) return null;
+    const best = side === "BID" ? this.bestBid(tokenId) : this.bestAsk(tokenId);
+    if (!best) return null;
+    const levels = side === "BID" ? book.bids : book.asks;
+    let depth = 0;
+    for (const [price, size] of levels) {
+      const withinThreeCents =
+        side === "BID" ? price >= best.price - 0.03 : price <= best.price + 0.03;
+      if (withinThreeCents && size > 0) depth += size;
+    }
+    return Number(depth.toFixed(4));
+  }
+
+  private directionSignal(change60sPct: number | null): LiveMarketSnapshot["signal"] {
+    const market = this.activeMarket;
+    const yesBidDepth = market.yesTokenId ? this.nearDepth(market.yesTokenId, "BID") : null;
+    const yesAskDepth = market.yesTokenId ? this.nearDepth(market.yesTokenId, "ASK") : null;
+    const noBidDepth = market.noTokenId ? this.nearDepth(market.noTokenId, "BID") : null;
+    const noAskDepth = market.noTokenId ? this.nearDepth(market.noTokenId, "ASK") : null;
+    const btcDirection: Direction | null =
+      change60sPct === null || Math.abs(change60sPct) < 0.002
+        ? null
+        : change60sPct > 0
+          ? "UP"
+          : "DOWN";
+    if (
+      yesBidDepth === null ||
+      yesAskDepth === null ||
+      noBidDepth === null ||
+      noAskDepth === null
+    ) {
+      return {
+        btcDirection,
+        bookDirection: null,
+        selectedDirection: null,
+        confirmed: false,
+        reason: "Waiting for complete Up/Down bid and ask depth.",
+      };
+    }
+
+    const upPressure = yesBidDepth / Math.max(yesAskDepth, 0.0001);
+    const downPressure = noBidDepth / Math.max(noAskDepth, 0.0001);
+    const bookDirection: Direction | null =
+      upPressure >= downPressure * 1.15
+        ? "UP"
+        : downPressure >= upPressure * 1.15
+          ? "DOWN"
+          : null;
+    if (!btcDirection) {
+      return {
+        btcDirection: null,
+        bookDirection,
+        selectedDirection: null,
+        confirmed: false,
+        reason: "The BTC 60-second direction is too close to flat to select a side.",
+      };
+    }
+    if (!bookDirection) {
+      return {
+        btcDirection,
+        bookDirection: null,
+        selectedDirection: null,
+        confirmed: false,
+        reason: "Polymarket near-book pressure does not clearly favour Up or Down.",
+      };
+    }
+    if (btcDirection !== bookDirection) {
+      return {
+        btcDirection,
+        bookDirection,
+        selectedDirection: null,
+        confirmed: false,
+        reason: `BTC points ${btcDirection}, but Polymarket orderbook pressure points ${bookDirection}; skipping the trade.`,
+      };
+    }
+    return {
+      btcDirection,
+      bookDirection,
+      selectedDirection: btcDirection,
+      confirmed: true,
+      reason: `BTC direction and Polymarket orderbook pressure both confirm ${btcDirection}.`,
+    };
   }
 
   private async refreshAccount() {

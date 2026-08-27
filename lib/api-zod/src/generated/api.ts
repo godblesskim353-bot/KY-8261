@@ -38,7 +38,11 @@ export const getPolymarketLiveSnapshotResponseSequenceMin = 0;
 
 export const getPolymarketLiveSnapshotResponseQuotesYesAskLevelsMin = 0;
 
+export const getPolymarketLiveSnapshotResponseQuotesYesBidLevelsMin = 0;
+
 export const getPolymarketLiveSnapshotResponseQuotesNoAskLevelsMin = 0;
+
+export const getPolymarketLiveSnapshotResponseQuotesNoBidLevelsMin = 0;
 
 
 
@@ -66,13 +70,30 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
   "yesBestAsk": zod.number().nullable(),
   "yesAskSize": zod.number().nullable(),
   "yesAskLevels": zod.number().min(getPolymarketLiveSnapshotResponseQuotesYesAskLevelsMin).nullable(),
+  "yesBestBid": zod.number().nullable(),
+  "yesBidSize": zod.number().nullable(),
+  "yesBidLevels": zod.number().min(getPolymarketLiveSnapshotResponseQuotesYesBidLevelsMin).nullable(),
   "noBestAsk": zod.number().nullable(),
   "noAskSize": zod.number().nullable(),
   "noAskLevels": zod.number().min(getPolymarketLiveSnapshotResponseQuotesNoAskLevelsMin).nullable(),
+  "noBestBid": zod.number().nullable(),
+  "noBidSize": zod.number().nullable(),
+  "noBidLevels": zod.number().min(getPolymarketLiveSnapshotResponseQuotesNoBidLevelsMin).nullable(),
   "combinedAsk": zod.number().nullable(),
   "commonDepth": zod.number().nullable(),
   "edge": zod.number().nullable(),
+  "yesBidDepth": zod.number().nullable(),
+  "yesAskDepth": zod.number().nullable(),
+  "noBidDepth": zod.number().nullable(),
+  "noAskDepth": zod.number().nullable(),
   "fresh": zod.boolean()
+}),
+  "signal": zod.object({
+  "btcDirection": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "bookDirection": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "selectedDirection": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "confirmed": zod.boolean(),
+  "reason": zod.string()
 }),
   "wallet": zod.object({
   "balancePusd": zod.number().nullable(),
@@ -95,21 +116,30 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
   "reason": zod.string()
 }),
   "execution": zod.object({
-  "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
-  "yesOrderId": zod.string().nullable(),
-  "noOrderId": zod.string().nullable(),
-  "unresolvedLeg": zod.boolean(),
+  "side": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "entryOrderId": zod.string().nullable(),
+  "exitOrderId": zod.string().nullable(),
+  "unresolvedOrder": zod.boolean(),
   "plannedShares": zod.number().nullable(),
   "plannedCostPusd": zod.number().nullable(),
-  "recoveryAction": zod.string().nullable(),
-  "recoveryOrderId": zod.string().nullable(),
-  "mergeTxHash": zod.string().nullable()
+  "entryPricePusd": zod.number().nullable(),
+  "takeProfitPricePusd": zod.number().nullable(),
+  "remainingShares": zod.number().nullable(),
+  "exitSellFloorPusd": zod.number().nullable(),
+  "exitTriggered": zod.boolean(),
+  "directionReason": zod.string().nullable(),
+  "entryCombinedAskPusd": zod.number().nullable(),
+  "lastExitError": zod.string().nullable(),
+  "lastAttemptAt": zod.coerce.date().nullable(),
+  "lastAttemptCombinedAsk": zod.number().nullable(),
+  "lastAttemptOutcome": zod.string().nullable()
 })
 })
 
@@ -118,21 +148,30 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
  * @summary Activate the server-side two-leg execution kill switch
  */
 export const StopPolymarketExecutionResponse = zod.object({
-  "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
-  "yesOrderId": zod.string().nullable(),
-  "noOrderId": zod.string().nullable(),
-  "unresolvedLeg": zod.boolean(),
+  "side": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "entryOrderId": zod.string().nullable(),
+  "exitOrderId": zod.string().nullable(),
+  "unresolvedOrder": zod.boolean(),
   "plannedShares": zod.number().nullable(),
   "plannedCostPusd": zod.number().nullable(),
-  "recoveryAction": zod.string().nullable(),
-  "recoveryOrderId": zod.string().nullable(),
-  "mergeTxHash": zod.string().nullable()
+  "entryPricePusd": zod.number().nullable(),
+  "takeProfitPricePusd": zod.number().nullable(),
+  "remainingShares": zod.number().nullable(),
+  "exitSellFloorPusd": zod.number().nullable(),
+  "exitTriggered": zod.boolean(),
+  "directionReason": zod.string().nullable(),
+  "entryCombinedAskPusd": zod.number().nullable(),
+  "lastExitError": zod.string().nullable(),
+  "lastAttemptAt": zod.coerce.date().nullable(),
+  "lastAttemptCombinedAsk": zod.number().nullable(),
+  "lastAttemptOutcome": zod.string().nullable()
 })
 
 
@@ -140,21 +179,30 @@ export const StopPolymarketExecutionResponse = zod.object({
  * @summary Arm automatic protected pair execution from the control room
  */
 export const ArmPolymarketExecutionResponse = zod.object({
-  "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
-  "yesOrderId": zod.string().nullable(),
-  "noOrderId": zod.string().nullable(),
-  "unresolvedLeg": zod.boolean(),
+  "side": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "entryOrderId": zod.string().nullable(),
+  "exitOrderId": zod.string().nullable(),
+  "unresolvedOrder": zod.boolean(),
   "plannedShares": zod.number().nullable(),
   "plannedCostPusd": zod.number().nullable(),
-  "recoveryAction": zod.string().nullable(),
-  "recoveryOrderId": zod.string().nullable(),
-  "mergeTxHash": zod.string().nullable()
+  "entryPricePusd": zod.number().nullable(),
+  "takeProfitPricePusd": zod.number().nullable(),
+  "remainingShares": zod.number().nullable(),
+  "exitSellFloorPusd": zod.number().nullable(),
+  "exitTriggered": zod.boolean(),
+  "directionReason": zod.string().nullable(),
+  "entryCombinedAskPusd": zod.number().nullable(),
+  "lastExitError": zod.string().nullable(),
+  "lastAttemptAt": zod.coerce.date().nullable(),
+  "lastAttemptCombinedAsk": zod.number().nullable(),
+  "lastAttemptOutcome": zod.string().nullable()
 })
 
 
@@ -162,21 +210,30 @@ export const ArmPolymarketExecutionResponse = zod.object({
  * @summary Pause automatic protected pair execution
  */
 export const PausePolymarketExecutionResponse = zod.object({
-  "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
-  "yesOrderId": zod.string().nullable(),
-  "noOrderId": zod.string().nullable(),
-  "unresolvedLeg": zod.boolean(),
+  "side": zod.union([zod.literal('UP'),zod.literal('DOWN'),zod.literal(null)]).nullable(),
+  "entryOrderId": zod.string().nullable(),
+  "exitOrderId": zod.string().nullable(),
+  "unresolvedOrder": zod.boolean(),
   "plannedShares": zod.number().nullable(),
   "plannedCostPusd": zod.number().nullable(),
-  "recoveryAction": zod.string().nullable(),
-  "recoveryOrderId": zod.string().nullable(),
-  "mergeTxHash": zod.string().nullable()
+  "entryPricePusd": zod.number().nullable(),
+  "takeProfitPricePusd": zod.number().nullable(),
+  "remainingShares": zod.number().nullable(),
+  "exitSellFloorPusd": zod.number().nullable(),
+  "exitTriggered": zod.boolean(),
+  "directionReason": zod.string().nullable(),
+  "entryCombinedAskPusd": zod.number().nullable(),
+  "lastExitError": zod.string().nullable(),
+  "lastAttemptAt": zod.coerce.date().nullable(),
+  "lastAttemptCombinedAsk": zod.number().nullable(),
+  "lastAttemptOutcome": zod.string().nullable()
 })
 
 

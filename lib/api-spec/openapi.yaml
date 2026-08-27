@@ -54,7 +54,7 @@ paths:
     post:
       operationId: stopPolymarketExecution
       tags: [polymarket]
-      summary: Activate the server-side two-leg execution kill switch
+      summary: Activate the server-side directional execution kill switch
       responses:
         "200":
           description: Execution has been halted and any tracked orders were cancelled
@@ -270,14 +270,33 @@ components:
             yesBestAsk: { type: [number, "null"] }
             yesAskSize: { type: [number, "null"] }
             yesAskLevels: { type: [number, "null"], minimum: 0 }
+            yesBestBid: { type: [number, "null"] }
+            yesBidSize: { type: [number, "null"] }
+            yesBidLevels: { type: [number, "null"], minimum: 0 }
             noBestAsk: { type: [number, "null"] }
             noAskSize: { type: [number, "null"] }
             noAskLevels: { type: [number, "null"], minimum: 0 }
+            noBestBid: { type: [number, "null"] }
+            noBidSize: { type: [number, "null"] }
+            noBidLevels: { type: [number, "null"], minimum: 0 }
             combinedAsk: { type: [number, "null"] }
             commonDepth: { type: [number, "null"] }
             edge: { type: [number, "null"] }
+            yesBidDepth: { type: [number, "null"] }
+            yesAskDepth: { type: [number, "null"] }
+            noBidDepth: { type: [number, "null"] }
+            noAskDepth: { type: [number, "null"] }
             fresh: { type: boolean }
-          required: [yesBestAsk, yesAskSize, yesAskLevels, noBestAsk, noAskSize, noAskLevels, combinedAsk, commonDepth, edge, fresh]
+          required: [yesBestAsk, yesAskSize, yesAskLevels, yesBestBid, yesBidSize, yesBidLevels, noBestAsk, noAskSize, noAskLevels, noBestBid, noBidSize, noBidLevels, combinedAsk, commonDepth, edge, yesBidDepth, yesAskDepth, noBidDepth, noAskDepth, fresh]
+        signal:
+          type: object
+          properties:
+            btcDirection: { type: [string, "null"], enum: [UP, DOWN, null] }
+            bookDirection: { type: [string, "null"], enum: [UP, DOWN, null] }
+            selectedDirection: { type: [string, "null"], enum: [UP, DOWN, null] }
+            confirmed: { type: boolean }
+            reason: { type: string }
+          required: [btcDirection, bookDirection, selectedDirection, confirmed, reason]
         wallet:
           type: object
           properties:
@@ -306,20 +325,20 @@ components:
           required: [finalExecutionStakePusd, walletMaxStakePusd, marketAvailableVolumePusd, executable, reason]
         execution:
           $ref: "#/components/schemas/PolymarketExecution"
-      required: [ready, message, sequence, serverTime, market, spot, quotes, wallet, inventory, compound, execution]
+      required: [ready, message, sequence, serverTime, market, spot, quotes, signal, wallet, inventory, compound, execution]
     PolymarketExecution:
       type: object
       properties:
         mode:
           type: string
-          enum: [CLOB_TWO_LEG_FOK]
+          enum: [CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK]
         enabled:
           type: boolean
         armed:
           type: boolean
         state:
           type: string
-          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, RECOVERING, MERGING, FILLED, HALTED]
+          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, WAITING_FOR_TAKE_PROFIT, EXITING, EXIT_RETRYING, FILLED, HALTED]
         reason:
           type: string
         lastActionAt:
@@ -327,23 +346,43 @@ components:
           format: date-time
         conditionId:
           type: [string, "null"]
-        yesOrderId:
+        side:
           type: [string, "null"]
-        noOrderId:
+          enum: [UP, DOWN, null]
+        entryOrderId:
           type: [string, "null"]
-        unresolvedLeg:
+        exitOrderId:
+          type: [string, "null"]
+        unresolvedOrder:
           type: boolean
         plannedShares:
           type: [number, "null"]
         plannedCostPusd:
           type: [number, "null"]
-        recoveryAction:
+        entryPricePusd:
+          type: [number, "null"]
+        takeProfitPricePusd:
+          type: [number, "null"]
+        remainingShares:
+          type: [number, "null"]
+        exitSellFloorPusd:
+          type: [number, "null"]
+        exitTriggered:
+          type: boolean
+        directionReason:
           type: [string, "null"]
-        recoveryOrderId:
+        entryCombinedAskPusd:
+          type: [number, "null"]
+        lastExitError:
           type: [string, "null"]
-        mergeTxHash:
+        lastAttemptAt:
           type: [string, "null"]
-      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, yesOrderId, noOrderId, unresolvedLeg, plannedShares, plannedCostPusd, recoveryAction, recoveryOrderId, mergeTxHash]
+          format: date-time
+        lastAttemptCombinedAsk:
+          type: [number, "null"]
+        lastAttemptOutcome:
+          type: [string, "null"]
+      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, side, entryOrderId, exitOrderId, unresolvedOrder, plannedShares, plannedCostPusd, entryPricePusd, takeProfitPricePusd, remainingShares, exitSellFloorPusd, exitTriggered, directionReason, entryCombinedAskPusd, lastExitError, lastAttemptAt, lastAttemptCombinedAsk, lastAttemptOutcome]
     PolymarketOpportunityLog:
       type: object
       properties:

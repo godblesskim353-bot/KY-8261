@@ -10,7 +10,7 @@ import {
 import {
   calculateFinalExecutionStake,
 } from "../lib/compound";
-import { isCLOBTwoLegBridgeAvailable } from "../lib/automatic-pair-execution";
+import { isCLOBSingleLegBridgeAvailable } from "../lib/automatic-pair-execution";
 import { liveMarketData } from "../lib/live-market-data";
 
 const execFileAsync = promisify(execFile);
@@ -70,7 +70,7 @@ router.get("/polymarket/status", async (_req, res) => {
   const proxyReachable = proxyConfigured && (await isProxyReachable());
   const liveTradingEnabled = process.env.LIVE_TRADING_ENABLED === "true";
   const hasCredentials = credentialsConfigured();
-  const executionAvailable = isCLOBTwoLegBridgeAvailable();
+  const executionAvailable = isCLOBSingleLegBridgeAvailable();
 
   const data = GetPolymarketStatusResponse.parse({
     mode: proxyReachable && liveTradingEnabled && executionAvailable ? "LIVE_ARMED" : proxyReachable ? "LIVE_READ_ONLY" : "MOCK",
@@ -81,8 +81,8 @@ router.get("/polymarket/status", async (_req, res) => {
     executionAvailable,
     message: proxyReachable && executionAvailable
       ? liveTradingEnabled
-        ? "CLOB two-leg FOK execution is armed. Any unconfirmed or unmatched leg halts the bot."
-        : "CLOB two-leg FOK execution is installed but disabled by LIVE_TRADING_ENABLED."
+        ? "Directional single-leg FOK entry and +2¢ FAK exit supervision are available."
+        : "Directional single-leg execution is installed but disabled by LIVE_TRADING_ENABLED."
       : "The proxy guard is closed. Live requests are blocked and the dashboard remains in mock mode.",
   });
 

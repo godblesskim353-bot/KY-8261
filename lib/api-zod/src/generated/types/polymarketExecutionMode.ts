@@ -10,5 +10,5 @@ export type PolymarketExecutionMode = typeof PolymarketExecutionMode[keyof typeo
 
 
 export const PolymarketExecutionMode = {
-  CLOB_TWO_LEG_FOK: 'CLOB_TWO_LEG_FOK',
+  CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK: 'CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK',
 } as const;

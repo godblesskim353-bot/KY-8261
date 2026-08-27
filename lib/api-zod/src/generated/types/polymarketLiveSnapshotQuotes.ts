@@ -17,6 +17,15 @@ export type PolymarketLiveSnapshotQuotes = {
      */
   yesAskLevels: number | null;
   /** @nullable */
+  yesBestBid: number | null;
+  /** @nullable */
+  yesBidSize: number | null;
+  /**
+     * @minimum 0
+     * @nullable
+     */
+  yesBidLevels: number | null;
+  /** @nullable */
   noBestAsk: number | null;
   /** @nullable */
   noAskSize: number | null;
@@ -26,10 +35,27 @@ export type PolymarketLiveSnapshotQuotes = {
      */
   noAskLevels: number | null;
   /** @nullable */
+  noBestBid: number | null;
+  /** @nullable */
+  noBidSize: number | null;
+  /**
+     * @minimum 0
+     * @nullable
+     */
+  noBidLevels: number | null;
+  /** @nullable */
   combinedAsk: number | null;
   /** @nullable */
   commonDepth: number | null;
   /** @nullable */
   edge: number | null;
+  /** @nullable */
+  yesBidDepth: number | null;
+  /** @nullable */
+  yesAskDepth: number | null;
+  /** @nullable */
+  noBidDepth: number | null;
+  /** @nullable */
+  noAskDepth: number | null;
   fresh: boolean;
 };

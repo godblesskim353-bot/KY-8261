@@ -14,7 +14,7 @@ import type { AutomaticPairExecutionStatus, PairExecutionCandidate } from "./aut
  * this equal to MAX_COMBINED_ASK so every attempt the live gate would ever
  * allow is also captured here.
  */
-export const OPPORTUNITY_LOG_THRESHOLD_PUSD = 0.995;
+export const OPPORTUNITY_LOG_THRESHOLD_PUSD = 0.99;
 
 const MAX_LOG_ENTRIES = 300;
 // Worst-case round trip for one submission attempt: the CLOB helper process
@@ -117,11 +117,11 @@ export class OpportunityLogStore {
 
     if (sameWindow && execution.state === "FILLED") {
       if (entry.phase === "PRICE_WINDOW_OPEN") this.closePriceWindow(entry, now);
-      this.resolve(entry, "EXECUTED", "Both FOK legs filled; protected pair executed.", {
+      this.resolve(entry, "EXECUTED", `${execution.side ?? "Directional"} position entered and fully exited.`, {
         shares: execution.plannedShares,
         costPusd: execution.plannedCostPusd,
-        yesOrderId: execution.yesOrderId,
-        noOrderId: execution.noOrderId,
+        yesOrderId: execution.side === "UP" ? execution.entryOrderId : null,
+        noOrderId: execution.side === "DOWN" ? execution.entryOrderId : null,
       });
       return;
     }

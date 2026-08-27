@@ -99,6 +99,15 @@ export type PolymarketLiveSnapshotQuotes = {
      */
   yesAskLevels: number | null;
   /** @nullable */
+  yesBestBid: number | null;
+  /** @nullable */
+  yesBidSize: number | null;
+  /**
+     * @minimum 0
+     * @nullable
+     */
+  yesBidLevels: number | null;
+  /** @nullable */
   noBestAsk: number | null;
   /** @nullable */
   noAskSize: number | null;
@@ -108,12 +117,73 @@ export type PolymarketLiveSnapshotQuotes = {
      */
   noAskLevels: number | null;
   /** @nullable */
+  noBestBid: number | null;
+  /** @nullable */
+  noBidSize: number | null;
+  /**
+     * @minimum 0
+     * @nullable
+     */
+  noBidLevels: number | null;
+  /** @nullable */
   combinedAsk: number | null;
   /** @nullable */
   commonDepth: number | null;
   /** @nullable */
   edge: number | null;
+  /** @nullable */
+  yesBidDepth: number | null;
+  /** @nullable */
+  yesAskDepth: number | null;
+  /** @nullable */
+  noBidDepth: number | null;
+  /** @nullable */
+  noAskDepth: number | null;
   fresh: boolean;
+};
+
+/**
+ * @nullable
+ */
+export type PolymarketLiveSnapshotSignalBtcDirection = typeof PolymarketLiveSnapshotSignalBtcDirection[keyof typeof PolymarketLiveSnapshotSignalBtcDirection] | null;
+
+
+export const PolymarketLiveSnapshotSignalBtcDirection = {
+  UP: 'UP',
+  DOWN: 'DOWN',
+} as const;
+
+/**
+ * @nullable
+ */
+export type PolymarketLiveSnapshotSignalBookDirection = typeof PolymarketLiveSnapshotSignalBookDirection[keyof typeof PolymarketLiveSnapshotSignalBookDirection] | null;
+
+
+export const PolymarketLiveSnapshotSignalBookDirection = {
+  UP: 'UP',
+  DOWN: 'DOWN',
+} as const;
+
+/**
+ * @nullable
+ */
+export type PolymarketLiveSnapshotSignalSelectedDirection = typeof PolymarketLiveSnapshotSignalSelectedDirection[keyof typeof PolymarketLiveSnapshotSignalSelectedDirection] | null;
+
+
+export const PolymarketLiveSnapshotSignalSelectedDirection = {
+  UP: 'UP',
+  DOWN: 'DOWN',
+} as const;
+
+export type PolymarketLiveSnapshotSignal = {
+  /** @nullable */
+  btcDirection: PolymarketLiveSnapshotSignalBtcDirection;
+  /** @nullable */
+  bookDirection: PolymarketLiveSnapshotSignalBookDirection;
+  /** @nullable */
+  selectedDirection: PolymarketLiveSnapshotSignalSelectedDirection;
+  confirmed: boolean;
+  reason: string;
 };
 
 export type PolymarketLiveSnapshotWallet = {
@@ -153,7 +223,7 @@ export type PolymarketExecutionMode = typeof PolymarketExecutionMode[keyof typeo
 
 
 export const PolymarketExecutionMode = {
-  CLOB_TWO_LEG_FOK: 'CLOB_TWO_LEG_FOK',
+  CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK: 'CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK',
 } as const;
 
 export type PolymarketExecutionState = typeof PolymarketExecutionState[keyof typeof PolymarketExecutionState];
@@ -166,10 +236,22 @@ export const PolymarketExecutionState = {
   ARMED: 'ARMED',
   SUBMITTING: 'SUBMITTING',
   VERIFYING: 'VERIFYING',
-  RECOVERING: 'RECOVERING',
-  MERGING: 'MERGING',
+  WAITING_FOR_TAKE_PROFIT: 'WAITING_FOR_TAKE_PROFIT',
+  EXITING: 'EXITING',
+  EXIT_RETRYING: 'EXIT_RETRYING',
   FILLED: 'FILLED',
   HALTED: 'HALTED',
+} as const;
+
+/**
+ * @nullable
+ */
+export type PolymarketExecutionSide = typeof PolymarketExecutionSide[keyof typeof PolymarketExecutionSide] | null;
+
+
+export const PolymarketExecutionSide = {
+  UP: 'UP',
+  DOWN: 'DOWN',
 } as const;
 
 export interface PolymarketExecution {
@@ -183,20 +265,37 @@ export interface PolymarketExecution {
   /** @nullable */
   conditionId: string | null;
   /** @nullable */
-  yesOrderId: string | null;
+  side: PolymarketExecutionSide;
   /** @nullable */
-  noOrderId: string | null;
-  unresolvedLeg: boolean;
+  entryOrderId: string | null;
+  /** @nullable */
+  exitOrderId: string | null;
+  unresolvedOrder: boolean;
   /** @nullable */
   plannedShares: number | null;
   /** @nullable */
   plannedCostPusd: number | null;
   /** @nullable */
-  recoveryAction: string | null;
+  entryPricePusd: number | null;
   /** @nullable */
-  recoveryOrderId: string | null;
+  takeProfitPricePusd: number | null;
   /** @nullable */
-  mergeTxHash: string | null;
+  remainingShares: number | null;
+  /** @nullable */
+  exitSellFloorPusd: number | null;
+  exitTriggered: boolean;
+  /** @nullable */
+  directionReason: string | null;
+  /** @nullable */
+  entryCombinedAskPusd: number | null;
+  /** @nullable */
+  lastExitError: string | null;
+  /** @nullable */
+  lastAttemptAt: string | null;
+  /** @nullable */
+  lastAttemptCombinedAsk: number | null;
+  /** @nullable */
+  lastAttemptOutcome: string | null;
 }
 
 export interface PolymarketLiveSnapshot {
@@ -208,6 +307,7 @@ export interface PolymarketLiveSnapshot {
   market: PolymarketLiveSnapshotMarket;
   spot: PolymarketLiveSnapshotSpot;
   quotes: PolymarketLiveSnapshotQuotes;
+  signal: PolymarketLiveSnapshotSignal;
   wallet: PolymarketLiveSnapshotWallet;
   inventory: PolymarketLiveSnapshotInventory;
   compound: PolymarketLiveSnapshotCompound;

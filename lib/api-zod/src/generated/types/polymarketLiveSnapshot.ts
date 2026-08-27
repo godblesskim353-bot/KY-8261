@@ -10,6 +10,7 @@ import type { PolymarketLiveSnapshotCompound } from './polymarketLiveSnapshotCom
 import type { PolymarketLiveSnapshotInventory } from './polymarketLiveSnapshotInventory';
 import type { PolymarketLiveSnapshotMarket } from './polymarketLiveSnapshotMarket';
 import type { PolymarketLiveSnapshotQuotes } from './polymarketLiveSnapshotQuotes';
+import type { PolymarketLiveSnapshotSignal } from './polymarketLiveSnapshotSignal';
 import type { PolymarketLiveSnapshotSpot } from './polymarketLiveSnapshotSpot';
 import type { PolymarketLiveSnapshotWallet } from './polymarketLiveSnapshotWallet';
 
@@ -22,6 +23,7 @@ export interface PolymarketLiveSnapshot {
   market: PolymarketLiveSnapshotMarket;
   spot: PolymarketLiveSnapshotSpot;
   quotes: PolymarketLiveSnapshotQuotes;
+  signal: PolymarketLiveSnapshotSignal;
   wallet: PolymarketLiveSnapshotWallet;
   inventory: PolymarketLiveSnapshotInventory;
   compound: PolymarketLiveSnapshotCompound;
