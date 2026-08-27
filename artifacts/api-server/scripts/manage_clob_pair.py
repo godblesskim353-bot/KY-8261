@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from typing import Any
 
 # CRITICAL: py_clob_client_v2's HTTP layer (http_helpers/helpers.py) builds a
@@ -142,14 +141,11 @@ def submit_pair(value: dict[str, Any]) -> None:
     yes_price = required_positive_number(value, "yesPrice")
     no_price = required_positive_number(value, "noPrice")
     size = required_positive_number(value, "size")
-    submission_deadline = int(required_positive_number(value, "expiration"))
-    if submission_deadline <= int(time.time()) + 5:
-        unavailable("ORDER_EXPIRY_INVALID")
 
     client = configured_client()
     # FOK is a non-GTD order type. Polymarket rejects any non-zero expiration
-    # for non-GTD orders, while the local submission deadline above still
-    # prevents this pair from being attempted near the market's tail cutoff.
+    # for non-GTD orders. The FOK is immediate, so no client-side expiration
+    # deadline is needed here.
     fok_expiration = 0
     orders = [
         client.create_order(
