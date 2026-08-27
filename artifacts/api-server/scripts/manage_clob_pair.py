@@ -223,6 +223,7 @@ def get_orders(value: dict[str, Any]) -> None:
     orders = []
     for order_id in order_ids:
         response = client.get_order(order_id)
+        diagnostic_log("【查詢訂單回傳結果】", {"orderId": order_id, "response": response})
         if isinstance(response, dict):
             orders.append(
                 {
