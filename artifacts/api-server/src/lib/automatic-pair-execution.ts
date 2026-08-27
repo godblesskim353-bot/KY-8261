@@ -10,7 +10,6 @@ const API_SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const EXECUTION_HELPER = path.resolve(API_SERVER_DIR, "scripts/manage_clob_pair.py");
 const MIN_EDGE = 0.005;
 const MAX_COMBINED_ASK = 0.995;
-const TAIL_CUTOFF_MS = 20_000;
 const RECONCILE_INTERVAL_MS = 500;
 const RETRY_COOLDOWN_MS = 15_000;
 
@@ -249,7 +248,6 @@ export class AutomaticPairExecutionSupervisor {
     if (!candidate.market.conditionId || !candidate.market.yesTokenId || !candidate.market.noTokenId || candidate.market.endAt === null) {
       return "A verified active BTC 5-minute market is required.";
     }
-    if (candidate.market.endAt - Date.now() <= TAIL_CUTOFF_MS) return "Tail cutoff is active for this BTC window.";
     const { yesBestAsk, noBestAsk, commonDepth } = candidate.quotes;
     if (yesBestAsk === null || noBestAsk === null || commonDepth === null || yesBestAsk <= 0 || noBestAsk <= 0 || commonDepth < 1) {
       return "Positive two-sided best asks and at least one common share are required.";
@@ -287,7 +285,6 @@ export class AutomaticPairExecutionSupervisor {
         yesPrice: quotes.yesBestAsk,
         noPrice: quotes.noBestAsk,
         size: shares,
-        expiration: Math.floor((market.endAt - TAIL_CUTOFF_MS) / 1000),
       });
       const orders = response.orders ?? [];
       this.status.yesOrderId = orders.find((order) => order.leg === "YES")?.orderId ?? null;
