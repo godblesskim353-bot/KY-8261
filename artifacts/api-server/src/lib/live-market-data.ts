@@ -190,8 +190,11 @@ function clobBalancePython(): string | null {
   const configured =
     process.env.POLYMARKET_BALANCE_PYTHON?.trim() ||
     process.env.POLYMARKET_EXECUTION_PYTHON?.trim();
+  // An explicit override is trusted as-is: it may be a bare command name (e.g.
+  // "python3") meant to be resolved via $PATH, which existsSync() cannot check
+  // since it only tests literal filesystem paths, not PATH lookups.
+  if (configured) return configured;
   const candidates = [
-    configured,
     // Replit/Nix workspaces install the uv-managed interpreter here.
     path.resolve(process.cwd(), ".pythonlibs/bin/python"),
     path.resolve(API_SERVER_DIR, "../../.pythonlibs/bin/python"),
@@ -200,7 +203,7 @@ function clobBalancePython(): string | null {
     path.resolve(process.cwd(), ".venv/bin/python"),
     path.resolve(API_SERVER_DIR, "../../.venv/bin/python3"),
     path.resolve(API_SERVER_DIR, "../../.venv/bin/python"),
-  ].filter((value): value is string => Boolean(value));
+  ];
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
