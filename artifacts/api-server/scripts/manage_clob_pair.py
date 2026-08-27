@@ -41,6 +41,12 @@ def emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
+def diagnostic_log(label: str, value: object) -> None:
+    # Keep diagnostics on stderr: stdout is the machine-readable JSON protocol
+    # consumed by automatic-pair-execution.ts.
+    print(f"====== {label} ======: {value!r}", file=sys.stderr, flush=True)
+
+
 def unavailable(code: str) -> None:
     emit({"ok": False, "code": code})
     sys.exit(0)
@@ -168,6 +174,7 @@ def submit_pair(value: dict[str, Any]) -> None:
         ],
         defer_exec=True,
     )
+    diagnostic_log("【實盤下單回傳結果】", responses)
     if not isinstance(responses, list) or len(responses) != 2:
         unavailable("PAIR_SUBMISSION_UNCONFIRMED")
 
@@ -242,6 +249,7 @@ def main() -> None:
     except SystemExit:
         raise
     except Exception as exc:
+        diagnostic_log("【實盤下單嚴重噴錯】", f"{type(exc).__name__}: {exc}")
         # Classify the failure instead of swallowing it silently: the caller
         # (automatic-pair-execution.ts) surfaces this in the operator-facing
         # lifecycle reason, so a real bug (auth/proxy/signing/API rejection)
