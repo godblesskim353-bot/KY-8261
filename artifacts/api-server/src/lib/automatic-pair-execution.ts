@@ -421,8 +421,24 @@ export class AutomaticPairExecutionSupervisor {
   private async callHelper(action: "submit_pair" | "cancel_orders" | "get_orders", payload: Record<string, unknown>): Promise<HelperResult> {
     const python = executionPython();
     if (!python || !existsSync(EXECUTION_HELPER)) throw new Error("CLOB execution bridge is unavailable");
-    const { stdout } = await execFileAsync(python, [EXECUTION_HELPER, action, JSON.stringify(payload)], { timeout: 20_000, maxBuffer: 16 * 1024 });
-    return JSON.parse(stdout) as HelperResult;
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        python,
+        [EXECUTION_HELPER, action, JSON.stringify(payload)],
+        { timeout: 20_000, maxBuffer: 16 * 1024 },
+      );
+      if (stderr.trim()) {
+        logger.warn({ action, diagnostic: stderr.trim() }, "CLOB helper diagnostic output");
+      }
+      return JSON.parse(stdout) as HelperResult;
+    } catch (error) {
+      const errorRecord = error && typeof error === "object" ? (error as { stderr?: unknown }) : null;
+      const stderr = typeof errorRecord?.stderr === "string" ? errorRecord.stderr.trim() : "";
+      if (stderr) {
+        logger.error({ action, diagnostic: stderr }, "CLOB helper failed with diagnostic output");
+      }
+      throw error;
+    }
   }
 
   private setState(state: AutomaticPairExecutionStatus["state"], reason: string): void {
@@ -431,7 +447,7 @@ export class AutomaticPairExecutionSupervisor {
     this.status.reason = reason;
     if (changed) {
       this.status.lastActionAt = asIso(Date.now());
-      logger.info({ state }, "Protected CLOB pair execution state changed");
+      logger.info({ state, reason }, "Protected CLOB pair execution state changed");
     }
   }
 }
