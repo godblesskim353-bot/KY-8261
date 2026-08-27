@@ -1,0 +1,10 @@
+- [Trading safety boundary](trading-safety-boundary.md) — keep live execution disabled until exchange APIs and signing flows are explicitly verified.
+- [Rolling market verification](rolling-market-verification.md) — validate a current BTC 5-minute candidate with Gamma before treating its tokens as live.
+- [Wallet balance authentication](wallet-balance-authentication.md) — distinguish CLOB collateral credentials from Perps account credentials before displaying pUSD.
+- [CLOB client dependency path](clob-client-dependency-path.md) — use a package-managed official Python bridge if the Node client cannot be installed safely.
+- [Combo scope](combo-scope.md) — Polymarket Combo RFQ is for compatible multi-market positions, not same-market BTC YES/NO pairs.
+- [Execution hosting](execution-hosting.md) — protected CLOB pair supervision needs an always-on host; sleeping web services are unsafe.
+- [Directional execution recovery](arb-bot-arm-state-and-thresholds.md) — restart PAUSED; block duplicate entries on ambiguity; incomplete exits retry without HALTED.
+- [Residential proxy is a local sidecar](residential-proxy-local-sidecar.md) — RESIDENTIAL_PROXY_URL resolves to 127.0.0.1 on Replit; never copy it verbatim to a self-hosted deployment.
+- [Proxy protocol mismatch (SOCKS5)](proxy-protocol-mismatch-socks5.md) — a proxy reachable by curl can still hang a hand-rolled HTTP-CONNECT-only tunnel if the plan is SOCKS5-only; add a protocol branch, don't just swap URLs.
+- [Python HTTP client + PATH-command pitfalls](python-http-client-portability.md) — `existsSync()` can't validate a bare PATH command like "python3"; `httpx` needs `httpx[socks]`/`socksio` or a socks5h:// proxy ImportErrors at import time.

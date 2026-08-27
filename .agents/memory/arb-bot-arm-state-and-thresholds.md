@@ -1,20 +1,19 @@
 ---
-name: Protected-pair arm state and fail-closed recovery
-description: Manual re-arming and durable recovery rules for ambiguous real-money pair submissions.
+name: Directional execution arm state and recovery
+description: Manual re-arming and recovery rules for the single-leg directional BTC strategy.
 ---
 
 Every process restart must return the live-money supervisor to PAUSED and require
-an explicit operator START. An ambiguous or partial pair submission must persist
-a recovery lock and remain HALTED across restarts.
+an explicit operator START. Entry requires combined Up/Down best ask below 0.99;
+BTC 60-second direction selects the candidate side and matching near-book
+pressure confirms it. BTC never triggers entry by itself.
 
-**Why:** A real batch returned one accepted FOK leg and one precision rejection.
-Automatic cooldown retries and memory-only state could have repeated exposure or
-lost the incident state after a restart.
+**Why:** The user replaced protected two-sided execution with one directional
+position while retaining the combined-ask mispricing gate.
 
-**How to apply:** Journal intent before submission. Retry only when there is
-positive proof that no order reached the venue. Partial acknowledgements,
-missing IDs, lookup failures, mixed statuses, and uncertain cancellations all
-stay HALTED until an operator resolves the exposure.
+**How to apply:** Buy only the confirmed Up or Down token using FOK and size from
+10% of available pUSD, rounded to valid order precision without exceeding the
+wallet. Unknown entry results block duplicate entries.
 
 Activity-history timestamps and a 100c redemption are not proof that two legs
 were submitted or filled as one pair. Treat fills as a pair only when exact
@@ -27,16 +26,13 @@ hide a directional single-leg position.
 **How to apply:** Keep adjacent activity entries separate until exchange-side
 order and trade evidence proves they belong to the same execution attempt.
 
-Single-leg rescue must be mutually exclusive. After canceling the missing
-original FOK, re-read it and require a terminal-unfilled lifecycle plus an
-explicit zero matched quantity. Apply the same proof to a failed rescue hedge
-before selling the original leg. Any contradictory or unknown response HALTs.
+After a confirmed entry, target entry price +0.02 pUSD per share. Exit the same
+token with FAK/IOC and accept no more than 1% slippage. A partial, rejected, or
+unknown exit pauses new entries and keeps querying/retrying until inventory is
+zero; it must not enter HALTED merely because the exit is incomplete.
 
-**Why:** A cancel/status race or overlapping reconciliation tick can otherwise
-create a duplicate hedge or sell the original leg after the supposedly missing
-leg actually filled.
+**Why:** Exit completion takes priority over all new opportunities, but a
+persistent HALTED lock would prevent the requested autonomous liquidation loop.
 
-**How to apply:** Hold one lock across reconciliation and the complete rescue
-sequence. Preflight the real custody-compatible Merge route and conservative
-gas reserve before buying the missing leg. Once both legs are balanced, never
-sell one leg because Merge failed; preserve the complete set and HALT.
+**How to apply:** Maintain a durable position/exit journal, serialize execution
+ticks, and do not evaluate a new entry while any confirmed position remains.
