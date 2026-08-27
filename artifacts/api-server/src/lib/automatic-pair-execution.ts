@@ -49,7 +49,7 @@ export type PairExecutionCandidate = {
 type HelperOrder = { leg?: string; accepted?: boolean; orderId?: string | null };
 type HelperResult = { ok?: boolean; code?: string; detail?: string; orders?: HelperOrder[]; cancellationRequested?: boolean };
 type OrderStatus = { orderId?: string; status?: string; sizeMatched?: number | string | null };
-type OrderStatusResult = { ok?: boolean; orders?: OrderStatus[] };
+type OrderStatusResult = { ok?: boolean; code?: string; detail?: string; orders?: OrderStatus[] };
 
 function executionPython(): string | null {
   const configured = process.env.POLYMARKET_EXECUTION_PYTHON?.trim();
@@ -338,9 +338,12 @@ export class AutomaticPairExecutionSupervisor {
       const response = (await this.callHelper("get_orders", { orderIds })) as OrderStatusResult;
       if (response.ok !== true || !response.orders || response.orders.length !== 2) {
         this.status.unresolvedLeg = true;
-        const cancelled = await this.cancelTrackedOrders("FOK lifecycle could not be confirmed.");
+        const detail = response.code
+          ? ` (${[response.code, response.detail].filter(Boolean).join(": ")})`
+          : "";
+        const cancelled = await this.cancelTrackedOrders(`FOK lifecycle could not be confirmed${detail}.`);
         if (cancelled) this.clearPair();
-        this.scheduleCooldown("FOK lifecycle could not be confirmed.");
+        this.scheduleCooldown(`FOK lifecycle could not be confirmed${detail}.`);
         return;
       }
       const statuses = response.orders.map((order) => String(order.status ?? "UNKNOWN"));
@@ -353,14 +356,16 @@ export class AutomaticPairExecutionSupervisor {
         return;
       }
       this.status.unresolvedLeg = true;
-      const cancelled = await this.cancelTrackedOrders("A FOK leg did not produce a confirmed matching fill.");
+      const detail = ` (statuses: ${statuses.join(", ")})`;
+      const cancelled = await this.cancelTrackedOrders(`A FOK leg did not produce a confirmed matching fill${detail}.`);
       if (cancelled) this.clearPair();
-      this.scheduleCooldown("A FOK leg did not produce a confirmed matching fill.");
-    } catch {
+      this.scheduleCooldown(`A FOK leg did not produce a confirmed matching fill${detail}.`);
+    } catch (err) {
       this.status.unresolvedLeg = true;
+      const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
       const cancelled = await this.cancelTrackedOrders("FOK lifecycle lookup failed.");
       if (cancelled) this.clearPair();
-      this.scheduleCooldown("FOK lifecycle lookup failed.");
+      this.scheduleCooldown(`FOK lifecycle lookup failed${detail}.`);
     }
   }
 
