@@ -98,7 +98,7 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
   "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
@@ -106,7 +106,10 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
   "noOrderId": zod.string().nullable(),
   "unresolvedLeg": zod.boolean(),
   "plannedShares": zod.number().nullable(),
-  "plannedCostPusd": zod.number().nullable()
+  "plannedCostPusd": zod.number().nullable(),
+  "recoveryAction": zod.string().nullable(),
+  "recoveryOrderId": zod.string().nullable(),
+  "mergeTxHash": zod.string().nullable()
 })
 })
 
@@ -118,7 +121,7 @@ export const StopPolymarketExecutionResponse = zod.object({
   "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
@@ -126,7 +129,10 @@ export const StopPolymarketExecutionResponse = zod.object({
   "noOrderId": zod.string().nullable(),
   "unresolvedLeg": zod.boolean(),
   "plannedShares": zod.number().nullable(),
-  "plannedCostPusd": zod.number().nullable()
+  "plannedCostPusd": zod.number().nullable(),
+  "recoveryAction": zod.string().nullable(),
+  "recoveryOrderId": zod.string().nullable(),
+  "mergeTxHash": zod.string().nullable()
 })
 
 
@@ -137,7 +143,7 @@ export const ArmPolymarketExecutionResponse = zod.object({
   "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
@@ -145,7 +151,10 @@ export const ArmPolymarketExecutionResponse = zod.object({
   "noOrderId": zod.string().nullable(),
   "unresolvedLeg": zod.boolean(),
   "plannedShares": zod.number().nullable(),
-  "plannedCostPusd": zod.number().nullable()
+  "plannedCostPusd": zod.number().nullable(),
+  "recoveryAction": zod.string().nullable(),
+  "recoveryOrderId": zod.string().nullable(),
+  "mergeTxHash": zod.string().nullable()
 })
 
 
@@ -156,7 +165,7 @@ export const PausePolymarketExecutionResponse = zod.object({
   "mode": zod.enum(['CLOB_TWO_LEG_FOK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
-  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'FILLED', 'HALTED']),
+  "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'RECOVERING', 'MERGING', 'FILLED', 'HALTED']),
   "reason": zod.string(),
   "lastActionAt": zod.coerce.date().nullable(),
   "conditionId": zod.string().nullable(),
@@ -164,7 +173,10 @@ export const PausePolymarketExecutionResponse = zod.object({
   "noOrderId": zod.string().nullable(),
   "unresolvedLeg": zod.boolean(),
   "plannedShares": zod.number().nullable(),
-  "plannedCostPusd": zod.number().nullable()
+  "plannedCostPusd": zod.number().nullable(),
+  "recoveryAction": zod.string().nullable(),
+  "recoveryOrderId": zod.string().nullable(),
+  "mergeTxHash": zod.string().nullable()
 })
 
 

@@ -166,6 +166,8 @@ export const PolymarketExecutionState = {
   ARMED: 'ARMED',
   SUBMITTING: 'SUBMITTING',
   VERIFYING: 'VERIFYING',
+  RECOVERING: 'RECOVERING',
+  MERGING: 'MERGING',
   FILLED: 'FILLED',
   HALTED: 'HALTED',
 } as const;
@@ -189,6 +191,12 @@ export interface PolymarketExecution {
   plannedShares: number | null;
   /** @nullable */
   plannedCostPusd: number | null;
+  /** @nullable */
+  recoveryAction: string | null;
+  /** @nullable */
+  recoveryOrderId: string | null;
+  /** @nullable */
+  mergeTxHash: string | null;
 }
 
 export interface PolymarketLiveSnapshot {

@@ -15,12 +15,16 @@ const MIN_EDGE = 0.005;
 const MAX_COMBINED_ASK = 0.995;
 const RECONCILE_INTERVAL_MS = 500;
 const RETRY_COOLDOWN_MS = 15_000;
+const RESCUE_MERGE_PROFIT_PUSD = 0.02;
+const RESCUE_STOP_LOSS_FRACTION = 0.1;
+const RESCUE_ORDER_POLL_ATTEMPTS = 4;
+const RESCUE_ORDER_POLL_MS = 250;
 
 export type AutomaticPairExecutionStatus = {
   mode: "CLOB_TWO_LEG_FOK";
   enabled: boolean;
   armed: boolean;
-  state: "DISABLED" | "PAUSED" | "WAITING_FOR_MARKET" | "ARMED" | "SUBMITTING" | "VERIFYING" | "FILLED" | "HALTED";
+  state: "DISABLED" | "PAUSED" | "WAITING_FOR_MARKET" | "ARMED" | "SUBMITTING" | "VERIFYING" | "RECOVERING" | "MERGING" | "FILLED" | "HALTED";
   reason: string;
   lastActionAt: string | null;
   conditionId: string | null;
@@ -40,11 +44,20 @@ export type AutomaticPairExecutionStatus = {
   lastAttemptAt: string | null;
   lastAttemptCombinedAsk: number | null;
   lastAttemptOutcome: string | null;
+  recoveryAction: string | null;
+  recoveryOrderId: string | null;
+  mergeTxHash: string | null;
 };
 
 export type PairExecutionCandidate = {
   ready: boolean;
-  market: { conditionId: string | null; yesTokenId: string | null; noTokenId: string | null; endAt: number | null };
+  market: {
+    conditionId: string | null;
+    yesTokenId: string | null;
+    noTokenId: string | null;
+    endAt: number | null;
+    negRisk: boolean;
+  };
   quotes: { yesBestAsk: number | null; noBestAsk: number | null; commonDepth: number | null; fresh: boolean };
   walletBalancePusd: number | null;
 };
@@ -57,14 +70,30 @@ type HelperResult = {
   orders?: HelperOrder[];
   cancellationRequested?: boolean;
   noOrdersAccepted?: boolean;
+  mergeTxHash?: string;
 };
-type OrderStatus = { orderId?: string; status?: string; sizeMatched?: number | string | null };
+type OrderStatus = {
+  orderId?: string;
+  status?: string;
+  sizeMatched?: number | string | null;
+  originalSize?: number | string | null;
+  price?: number | string | null;
+  side?: string | null;
+  tokenId?: string | null;
+};
 type OrderStatusResult = { ok?: boolean; code?: string; detail?: string; orders?: OrderStatus[] };
 type ExecutionJournal = {
-  phase: "SUBMITTING" | "ACKNOWLEDGED" | "UNCONFIRMED";
+  phase: "SUBMITTING" | "ACKNOWLEDGED" | "RECOVERING" | "HEDGED" | "MERGING" | "UNCONFIRMED";
   conditionId: string | null;
+  yesTokenId: string | null;
+  noTokenId: string | null;
+  yesLimitPrice: number | null;
+  noLimitPrice: number | null;
+  plannedShares: number | null;
+  negRisk: boolean;
   yesOrderId: string | null;
   noOrderId: string | null;
+  recoveryOrderId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -74,7 +103,7 @@ function loadExecutionJournal(): ExecutionJournal | null {
   try {
     const parsed = JSON.parse(readFileSync(EXECUTION_JOURNAL_PATH, "utf8")) as Partial<ExecutionJournal>;
     if (
-      !["SUBMITTING", "ACKNOWLEDGED", "UNCONFIRMED"].includes(String(parsed.phase)) ||
+      !["SUBMITTING", "ACKNOWLEDGED", "RECOVERING", "HEDGED", "MERGING", "UNCONFIRMED"].includes(String(parsed.phase)) ||
       typeof parsed.createdAt !== "string" ||
       typeof parsed.updatedAt !== "string"
     ) {
@@ -83,8 +112,15 @@ function loadExecutionJournal(): ExecutionJournal | null {
     return {
       phase: parsed.phase as ExecutionJournal["phase"],
       conditionId: typeof parsed.conditionId === "string" ? parsed.conditionId : null,
+      yesTokenId: typeof parsed.yesTokenId === "string" ? parsed.yesTokenId : null,
+      noTokenId: typeof parsed.noTokenId === "string" ? parsed.noTokenId : null,
+      yesLimitPrice: typeof parsed.yesLimitPrice === "number" ? parsed.yesLimitPrice : null,
+      noLimitPrice: typeof parsed.noLimitPrice === "number" ? parsed.noLimitPrice : null,
+      plannedShares: typeof parsed.plannedShares === "number" ? parsed.plannedShares : null,
+      negRisk: parsed.negRisk === true,
       yesOrderId: typeof parsed.yesOrderId === "string" ? parsed.yesOrderId : null,
       noOrderId: typeof parsed.noOrderId === "string" ? parsed.noOrderId : null,
+      recoveryOrderId: typeof parsed.recoveryOrderId === "string" ? parsed.recoveryOrderId : null,
       createdAt: parsed.createdAt,
       updatedAt: parsed.updatedAt,
     };
@@ -93,8 +129,15 @@ function loadExecutionJournal(): ExecutionJournal | null {
     return {
       phase: "UNCONFIRMED",
       conditionId: null,
+      yesTokenId: null,
+      noTokenId: null,
+      yesLimitPrice: null,
+      noLimitPrice: null,
+      plannedShares: null,
+      negRisk: false,
       yesOrderId: null,
       noOrderId: null,
+      recoveryOrderId: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -145,6 +188,30 @@ function isFilled(status: string): boolean {
   return ["MATCHED", "FILLED"].includes(status.toUpperCase());
 }
 
+function isTerminalUnfilled(status: string): boolean {
+  return ["CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED", "FAILED", "REJECTED"].includes(
+    status.toUpperCase(),
+  );
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function exactMatchedSize(order: OrderStatus, expected: number): boolean {
+  const matched = finiteNumber(order.sizeMatched);
+  return isFilled(String(order.status ?? "")) && matched !== null && Math.abs(matched - expected) <= 0.0001;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export function isCLOBTwoLegBridgeAvailable(): boolean {
   return Boolean(
     executionPython() &&
@@ -172,13 +239,23 @@ export class AutomaticPairExecutionSupervisor {
     lastAttemptAt: null,
     lastAttemptCombinedAsk: null,
     lastAttemptOutcome: null,
+    recoveryAction: null,
+    recoveryOrderId: null,
+    mergeTxHash: null,
   };
   private submitting = false;
   private inFlight = false;
   private cancelling = false;
+  private recovering = false;
+  private reconciling = false;
   private lastReconcileAt = 0;
   private completedConditionId: string | null = null;
   private retryAfterAt = 0;
+  private yesTokenId: string | null = null;
+  private noTokenId: string | null = null;
+  private yesLimitPrice: number | null = null;
+  private noLimitPrice: number | null = null;
+  private negRisk = false;
 
   constructor() {
     const journal = loadExecutionJournal();
@@ -189,7 +266,14 @@ export class AutomaticPairExecutionSupervisor {
       this.status.conditionId = journal.conditionId;
       this.status.yesOrderId = journal.yesOrderId;
       this.status.noOrderId = journal.noOrderId;
+      this.status.recoveryOrderId = journal.recoveryOrderId;
+      this.status.plannedShares = journal.plannedShares;
       this.status.lastActionAt = journal.updatedAt;
+      this.yesTokenId = journal.yesTokenId;
+      this.noTokenId = journal.noTokenId;
+      this.yesLimitPrice = journal.yesLimitPrice;
+      this.noLimitPrice = journal.noLimitPrice;
+      this.negRisk = journal.negRisk;
     }
   }
   snapshot(): AutomaticPairExecutionStatus {
@@ -211,12 +295,10 @@ export class AutomaticPairExecutionSupervisor {
       this.setState("PAUSED", "Press START AUTO EXECUTION to begin automatic execution.");
       return;
     }
+    if (this.recovering) return;
     if (this.status.unresolvedLeg) {
-      if (Date.now() < this.retryAfterAt) {
-        this.setState("WAITING_FOR_MARKET", "Protected-pair recovery cooldown is active; automatic reconciliation will retry in 15 seconds.");
-        return;
-      }
-      await this.recoverOutstandingPair();
+      this.status.armed = false;
+      this.setState("HALTED", "An unresolved execution requires operator review before trading can resume.");
       return;
     }
     if (this.retryAfterAt > Date.now()) {
@@ -224,7 +306,7 @@ export class AutomaticPairExecutionSupervisor {
       return;
     }
     if (this.inFlight) {
-      await this.reconcileIfDue();
+      await this.reconcileIfDue(candidate);
       return;
     }
     if (candidate.market.conditionId && candidate.market.conditionId !== this.completedConditionId && this.status.state === "FILLED") {
@@ -336,6 +418,14 @@ export class AutomaticPairExecutionSupervisor {
     this.status.plannedCostPusd = Number((shares * (quotes.yesBestAsk + quotes.noBestAsk)).toFixed(2));
     this.status.lastAttemptAt = new Date().toISOString();
     this.status.lastAttemptCombinedAsk = Number((quotes.yesBestAsk + quotes.noBestAsk).toFixed(4));
+    this.status.recoveryAction = null;
+    this.status.recoveryOrderId = null;
+    this.status.mergeTxHash = null;
+    this.yesTokenId = market.yesTokenId;
+    this.noTokenId = market.noTokenId;
+    this.yesLimitPrice = quotes.yesBestAsk;
+    this.noLimitPrice = quotes.noBestAsk;
+    this.negRisk = market.negRisk;
     this.setState("SUBMITTING", "Submitting one FOK limit batch for the YES/NO pair.");
     try {
       this.recordExecutionJournal("SUBMITTING");
@@ -379,7 +469,7 @@ export class AutomaticPairExecutionSupervisor {
       this.recordExecutionJournal("ACKNOWLEDGED");
       this.inFlight = true;
       this.setState("VERIFYING", "Both FOK orders accepted; confirming matched lifecycle.");
-      await this.reconcileIfDue(true);
+       await this.reconcileIfDue(candidate, true);
     } catch (err) {
       this.status.unresolvedLeg = true;
       const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 200)})` : "";
@@ -397,8 +487,13 @@ export class AutomaticPairExecutionSupervisor {
     }
   }
 
-  private async reconcileIfDue(force = false): Promise<void> {
-    if (!this.inFlight || this.cancelling || (!force && Date.now() - this.lastReconcileAt < RECONCILE_INTERVAL_MS)) return;
+  private async reconcileIfDue(candidate: PairExecutionCandidate, force = false): Promise<void> {
+    if (
+      !this.inFlight ||
+      this.cancelling ||
+      this.reconciling ||
+      (!force && Date.now() - this.lastReconcileAt < RECONCILE_INTERVAL_MS)
+    ) return;
     const orderIds = [this.status.yesOrderId, this.status.noOrderId].filter((value): value is string => Boolean(value));
     if (orderIds.length !== 2) {
       this.status.unresolvedLeg = true;
@@ -408,6 +503,7 @@ export class AutomaticPairExecutionSupervisor {
       this.setState("HALTED", "The two-leg lifecycle has an unresolved order identifier; operator review is required.");
       return;
     }
+    this.reconciling = true;
     this.lastReconcileAt = Date.now();
     try {
       const response = (await this.callHelper("get_orders", { orderIds })) as OrderStatusResult;
@@ -423,8 +519,22 @@ export class AutomaticPairExecutionSupervisor {
         this.setState("HALTED", `FOK lifecycle could not be confirmed; operator review is required${detail}.`);
         return;
       }
-      const statuses = response.orders.map((order) => String(order.status ?? "UNKNOWN"));
-      if (statuses.every(isFilled)) {
+      const yesOrder = response.orders.find((order) => order.orderId === this.status.yesOrderId);
+      const noOrder = response.orders.find((order) => order.orderId === this.status.noOrderId);
+      const plannedShares = this.status.plannedShares;
+      if (!yesOrder || !noOrder || plannedShares === null) {
+        this.status.unresolvedLeg = true;
+        this.inFlight = false;
+        this.status.armed = false;
+        this.setState("HALTED", "FOK lifecycle response could not be mapped to the planned pair.");
+        return;
+      }
+      const yesMatched = finiteNumber(yesOrder.sizeMatched);
+      const noMatched = finiteNumber(noOrder.sizeMatched);
+      const yesFull = exactMatchedSize(yesOrder, plannedShares);
+      const noFull = exactMatchedSize(noOrder, plannedShares);
+      const statuses = [String(yesOrder.status ?? "UNKNOWN"), String(noOrder.status ?? "UNKNOWN")];
+      if (yesFull && noFull) {
         this.inFlight = false;
         this.status.unresolvedLeg = false;
         this.retryAfterAt = 0;
@@ -433,8 +543,30 @@ export class AutomaticPairExecutionSupervisor {
         this.setState("FILLED", "Both FOK legs fully filled. This BTC window is complete.");
         return;
       }
+      const oneExactLeg =
+        yesFull && noMatched === 0
+          ? { filledLeg: "YES" as const, filledOrder: yesOrder, missingOrder: noOrder }
+          : noFull && yesMatched === 0
+            ? { filledLeg: "NO" as const, filledOrder: noOrder, missingOrder: yesOrder }
+            : null;
+      if (oneExactLeg) {
+        this.inFlight = false;
+        await this.recoverSingleLeg(candidate, oneExactLeg);
+        return;
+      }
+      if (
+        yesMatched === 0 &&
+        noMatched === 0 &&
+        statuses.every(isTerminalUnfilled)
+      ) {
+        this.inFlight = false;
+        clearExecutionJournal();
+        this.clearPair();
+        this.scheduleCooldown("Both FOK legs terminated with zero matched quantity.");
+        return;
+      }
       this.status.unresolvedLeg = true;
-      const detail = ` (statuses: ${statuses.join(", ")})`;
+      const detail = ` (statuses: ${statuses.join(", ")}; matched: ${yesMatched ?? "unknown"}/${noMatched ?? "unknown"})`;
       await this.cancelTrackedOrders(`A FOK leg did not produce a confirmed matching fill${detail}.`);
       this.status.armed = false;
       this.retryAfterAt = 0;
@@ -446,25 +578,221 @@ export class AutomaticPairExecutionSupervisor {
       this.status.armed = false;
       this.retryAfterAt = 0;
       this.setState("HALTED", `FOK lifecycle lookup failed; operator review is required${detail}.`);
+    } finally {
+      this.reconciling = false;
     }
   }
 
-  private async recoverOutstandingPair(): Promise<void> {
-    const orderIds = [this.status.yesOrderId, this.status.noOrderId].filter(
-      (value): value is string => Boolean(value),
-    );
-    if (!orderIds.length) {
-      this.clearPair();
-      this.scheduleCooldown("Previous pair had no recoverable order identifiers.");
+  private async recoverSingleLeg(
+    candidate: PairExecutionCandidate,
+    incident: {
+      filledLeg: "YES" | "NO";
+      filledOrder: OrderStatus;
+      missingOrder: OrderStatus;
+    },
+  ): Promise<void> {
+    if (this.recovering) {
+      this.haltRecovery("A duplicate single-leg recovery attempt was blocked.");
       return;
     }
-    this.inFlight = true;
-    this.setState("VERIFYING", "Checking the previous pair before automatic retry.");
-    await this.reconcileIfDue(true);
+    this.recovering = true;
+    this.status.unresolvedLeg = true;
+    this.status.recoveryAction = "BUY_MISSING_FOR_MERGE";
+    this.recordExecutionJournal("RECOVERING");
+    this.setState("RECOVERING", `Only ${incident.filledLeg} filled; attempting a +2c complete-set hedge.`);
+    try {
+      const plannedShares = this.status.plannedShares;
+      const conditionId = this.status.conditionId;
+      const sameMarket = conditionId && candidate.market.conditionId === conditionId;
+      const filledLimitPrice =
+        finiteNumber(incident.filledOrder.price) ??
+        (incident.filledLeg === "YES" ? this.yesLimitPrice : this.noLimitPrice);
+      const missingLeg = incident.filledLeg === "YES" ? "NO" : "YES";
+      const missingTokenId = missingLeg === "YES" ? this.yesTokenId : this.noTokenId;
+      const filledTokenId = incident.filledLeg === "YES" ? this.yesTokenId : this.noTokenId;
+      const missingBestAsk =
+        missingLeg === "YES" ? candidate.quotes.yesBestAsk : candidate.quotes.noBestAsk;
+      if (
+        plannedShares === null ||
+        !conditionId ||
+        !sameMarket ||
+        !candidate.quotes.fresh ||
+        filledLimitPrice === null ||
+        !missingTokenId ||
+        !filledTokenId
+      ) {
+        this.haltRecovery("Single-leg recovery context or fresh market data is unavailable.");
+        return;
+      }
+
+      if (!isTerminalUnfilled(String(incident.missingOrder.status ?? ""))) {
+        const missingOrderId = incident.missingOrder.orderId;
+        if (!missingOrderId || !(await this.cancelOrderIds([missingOrderId]))) {
+          this.haltRecovery("The unfilled FOK leg could not be confirmed canceled.");
+          return;
+        }
+      }
+      const missingOrderId = incident.missingOrder.orderId;
+      const finalMissingStatus = missingOrderId ? await this.pollOrder(missingOrderId) : null;
+      if (
+        !finalMissingStatus ||
+        !isTerminalUnfilled(String(finalMissingStatus.status ?? "")) ||
+        finiteNumber(finalMissingStatus.sizeMatched) !== 0
+      ) {
+        this.haltRecovery("The missing original FOK leg was not re-confirmed terminal with zero matched quantity.");
+        return;
+      }
+
+      const maxMissingPrice = Math.floor(
+        (1 - RESCUE_MERGE_PROFIT_PUSD - filledLimitPrice + Number.EPSILON) * 100,
+      ) / 100;
+      const canHedgeProfitably =
+        missingBestAsk !== null &&
+        missingBestAsk > 0 &&
+        maxMissingPrice > 0 &&
+        missingBestAsk <= maxMissingPrice &&
+        candidate.walletBalancePusd !== null &&
+        candidate.walletBalancePusd >= maxMissingPrice * plannedShares;
+
+      let mergeCapability: HelperResult = { ok: false, code: "MERGE_NOT_CHECKED" };
+      if (canHedgeProfitably) {
+        mergeCapability = await this.callHelper("merge_capability", {
+          conditionId,
+          yesTokenId: this.yesTokenId,
+          noTokenId: this.noTokenId,
+          size: plannedShares,
+          negRisk: this.negRisk,
+        });
+      }
+
+      if (canHedgeProfitably && mergeCapability.ok === true && mergeCapability.code === "MERGE_CAPABLE") {
+        const hedge = await this.callHelper("submit_fok_buy", {
+          tokenId: missingTokenId,
+          leg: missingLeg,
+          price: maxMissingPrice,
+          size: plannedShares,
+        });
+        const hedgeOrderId = hedge.orders?.[0]?.orderId ?? null;
+        this.status.recoveryOrderId = hedgeOrderId;
+        this.recordExecutionJournal("RECOVERING");
+        if (hedge.ok === true && hedgeOrderId) {
+          const hedgeStatus = await this.pollOrder(hedgeOrderId);
+          if (hedgeStatus && exactMatchedSize(hedgeStatus, plannedShares)) {
+            this.status.unresolvedLeg = false;
+            this.status.recoveryAction = "MERGE_COMPLETE_SET";
+            this.recordExecutionJournal("HEDGED");
+            this.setState("MERGING", "Missing leg filled within the +2c target; merging the exact complete set.");
+            this.recordExecutionJournal("MERGING");
+            const merge = await this.callHelper("merge_positions", {
+              conditionId,
+              yesTokenId: this.yesTokenId,
+              noTokenId: this.noTokenId,
+              size: plannedShares,
+              negRisk: this.negRisk,
+            });
+            if (merge.ok === true && merge.code === "MERGE_CONFIRMED" && merge.mergeTxHash) {
+              const completedConditionId = this.status.conditionId;
+              this.status.mergeTxHash = merge.mergeTxHash;
+              this.completedConditionId = completedConditionId;
+              clearExecutionJournal();
+              this.clearPair({ preserveMergeTxHash: true });
+              this.setState("FILLED", "Single-leg incident recovered: missing leg filled and complete set merged to pUSD.");
+              return;
+            }
+            this.status.armed = false;
+            this.status.unresolvedLeg = false;
+            this.setState(
+              "HALTED",
+              `Both outcome legs are balanced, but Merge was not confirmed (${merge.code ?? "unknown"}); operator review is required.`,
+            );
+            return;
+          }
+          // Once an accepted hedge order cannot be proved zero-fill, selling
+          // the original leg could create a new opposite exposure.
+          if (
+            !hedgeStatus ||
+            !isTerminalUnfilled(String(hedgeStatus.status ?? "")) ||
+            finiteNumber(hedgeStatus.sizeMatched) !== 0
+          ) {
+            this.haltRecovery("The missing-leg FOK result is partial or unknown; the original leg will not be sold automatically.");
+            return;
+          }
+        } else if (hedge.noOrdersAccepted !== true) {
+          this.haltRecovery("The missing-leg FOK submission outcome is ambiguous.");
+          return;
+        }
+      } else if (canHedgeProfitably) {
+        logger.warn(
+          { code: mergeCapability.code },
+          "Skipped missing-leg hedge because custody-compatible Merge is unavailable",
+        );
+      }
+
+      this.status.recoveryAction = "SELL_FILLED_AT_10_PERCENT_STOP";
+      const stopPrice = Math.ceil(
+        filledLimitPrice * (1 - RESCUE_STOP_LOSS_FRACTION) * 100 - Number.EPSILON,
+      ) / 100;
+      this.setState("RECOVERING", `Profitable hedge unavailable; submitting ${incident.filledLeg} FAK stop at ${stopPrice.toFixed(2)}.`);
+      const unwind = await this.callHelper("submit_fak_sell", {
+        tokenId: filledTokenId,
+        leg: incident.filledLeg,
+        price: stopPrice,
+        size: plannedShares,
+      });
+      const unwindOrderId = unwind.orders?.[0]?.orderId ?? null;
+      this.status.recoveryOrderId = unwindOrderId;
+      this.recordExecutionJournal("RECOVERING");
+      if (unwind.ok !== true || !unwindOrderId) {
+        this.haltRecovery(`The -10% FAK stop was rejected or unconfirmed (${unwind.code ?? "unknown"}).`);
+        return;
+      }
+      const unwindStatus = await this.pollOrder(unwindOrderId);
+      if (!unwindStatus || !exactMatchedSize(unwindStatus, plannedShares)) {
+        this.haltRecovery("The -10% FAK stop did not fully flatten the exposed quantity.");
+        return;
+      }
+      clearExecutionJournal();
+      this.clearPair();
+      this.status.armed = false;
+      this.setState("HALTED", "Single-leg exposure was fully unwound by the -10% FAK stop; manual re-arm is required.");
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? ` (${err.message.slice(0, 180)})` : "";
+      this.haltRecovery(`Single-leg recovery failed${detail}.`);
+    } finally {
+      this.recovering = false;
+    }
+  }
+
+  private async pollOrder(orderId: string): Promise<OrderStatus | null> {
+    for (let attempt = 0; attempt < RESCUE_ORDER_POLL_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await delay(RESCUE_ORDER_POLL_MS);
+      const response = (await this.callHelper("get_orders", { orderIds: [orderId] })) as OrderStatusResult;
+      const order = response.ok === true && response.orders?.length === 1 ? response.orders[0] : null;
+      if (!order) continue;
+      const matched = finiteNumber(order.sizeMatched);
+      if (isFilled(String(order.status ?? "")) || isTerminalUnfilled(String(order.status ?? "")) || (matched !== null && matched > 0)) {
+        return order;
+      }
+    }
+    return null;
+  }
+
+  private haltRecovery(reason: string): void {
+    this.status.armed = false;
+    this.status.unresolvedLeg = true;
+    this.retryAfterAt = 0;
+    this.recordExecutionJournal("UNCONFIRMED");
+    this.setState("HALTED", reason);
   }
 
   private async cancelTrackedOrders(reason: string): Promise<boolean> {
     const orderIds = [this.status.yesOrderId, this.status.noOrderId].filter((value): value is string => Boolean(value));
+    const cancelled = await this.cancelOrderIds(orderIds);
+    logger.warn({ reason, orderIds }, "Requested cancellation for protected pair");
+    return cancelled;
+  }
+
+  private async cancelOrderIds(orderIds: string[]): Promise<boolean> {
     if (!orderIds.length || this.cancelling) return true;
     this.cancelling = true;
     let cancelled = true;
@@ -480,18 +808,25 @@ export class AutomaticPairExecutionSupervisor {
     } finally {
       this.inFlight = false;
       this.cancelling = false;
-      logger.warn({ reason, orderIds }, "Requested cancellation for protected pair");
     }
     return cancelled;
   }
 
-  private clearPair(): void {
+  private clearPair(options: { preserveMergeTxHash?: boolean } = {}): void {
     this.status.conditionId = null;
     this.status.yesOrderId = null;
     this.status.noOrderId = null;
+    this.status.recoveryOrderId = null;
+    this.status.recoveryAction = null;
+    if (!options.preserveMergeTxHash) this.status.mergeTxHash = null;
     this.status.unresolvedLeg = false;
     this.status.plannedShares = null;
     this.status.plannedCostPusd = null;
+    this.yesTokenId = null;
+    this.noTokenId = null;
+    this.yesLimitPrice = null;
+    this.noLimitPrice = null;
+    this.negRisk = false;
   }
 
   private recordExecutionJournal(phase: ExecutionJournal["phase"]): void {
@@ -500,8 +835,15 @@ export class AutomaticPairExecutionSupervisor {
     persistExecutionJournal({
       phase,
       conditionId: this.status.conditionId,
+      yesTokenId: this.yesTokenId,
+      noTokenId: this.noTokenId,
+      yesLimitPrice: this.yesLimitPrice,
+      noLimitPrice: this.noLimitPrice,
+      plannedShares: this.status.plannedShares,
+      negRisk: this.negRisk,
       yesOrderId: this.status.yesOrderId,
       noOrderId: this.status.noOrderId,
+      recoveryOrderId: this.status.recoveryOrderId,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     });
@@ -513,7 +855,17 @@ export class AutomaticPairExecutionSupervisor {
     this.setState("WAITING_FOR_MARKET", `${reason} Automatic retry resumes after a 15-second cooldown.`);
   }
 
-  private async callHelper(action: "submit_pair" | "cancel_orders" | "get_orders", payload: Record<string, unknown>): Promise<HelperResult> {
+  private async callHelper(
+    action:
+      | "submit_pair"
+      | "submit_fok_buy"
+      | "submit_fak_sell"
+      | "merge_capability"
+      | "merge_positions"
+      | "cancel_orders"
+      | "get_orders",
+    payload: Record<string, unknown>,
+  ): Promise<HelperResult> {
     const python = executionPython();
     if (!python || !existsSync(EXECUTION_HELPER)) throw new Error("CLOB execution bridge is unavailable");
     try {

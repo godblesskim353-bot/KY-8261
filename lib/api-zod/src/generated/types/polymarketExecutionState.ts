@@ -16,6 +16,8 @@ export const PolymarketExecutionState = {
   ARMED: 'ARMED',
   SUBMITTING: 'SUBMITTING',
   VERIFYING: 'VERIFYING',
+  RECOVERING: 'RECOVERING',
+  MERGING: 'MERGING',
   FILLED: 'FILLED',
   HALTED: 'HALTED',
 } as const;

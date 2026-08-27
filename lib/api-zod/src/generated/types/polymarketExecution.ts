@@ -27,4 +27,10 @@ export interface PolymarketExecution {
   plannedShares: number | null;
   /** @nullable */
   plannedCostPusd: number | null;
+  /** @nullable */
+  recoveryAction: string | null;
+  /** @nullable */
+  recoveryOrderId: string | null;
+  /** @nullable */
+  mergeTxHash: string | null;
 }

@@ -10,6 +10,7 @@ cancel. Sensitive wallet and proxy values remain in server environment only.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -34,6 +35,14 @@ from py_clob_client_v2 import ClobClient, OrderArgsV2, OrderType, PostOrdersV2Ar
 CLOB_HOST = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
 DEFAULT_DEPOSIT_WALLET_SIGNATURE_TYPE = 3
+PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+CONDITIONAL_TOKENS_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+CTF_COLLATERAL_ADAPTER_ADDRESS = "0xAdA100Db00Ca00073811820692005400218FcE1f"
+NEG_RISK_CTF_COLLATERAL_ADAPTER_ADDRESS = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"
+TOKEN_BASE_UNITS = 1_000_000
+MERGE_GAS_RESERVE = 600_000
+APPROVAL_GAS_RESERVE = 150_000
+GAS_RESERVE_MULTIPLIER = 2
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -128,6 +137,20 @@ def required_positive_number(value: dict[str, Any], key: str) -> float:
     return parsed
 
 
+def required_probability(value: dict[str, Any], key: str) -> float:
+    parsed = required_positive_number(value, key)
+    if parsed >= 1:
+        unavailable("INVALID_REQUEST")
+    return parsed
+
+
+def required_boolean(value: dict[str, Any], key: str) -> bool:
+    raw = value.get(key)
+    if not isinstance(raw, bool):
+        unavailable("INVALID_REQUEST")
+    return raw
+
+
 def accepted_order_id(response: object) -> str | None:
     if not isinstance(response, dict) or response.get("success") is False:
         return None
@@ -144,6 +167,349 @@ def valid_market_buy_amount_precision(order: object) -> bool:
     # Polymarket represents amounts with six token decimals. Market BUY orders
     # allow at most two decimal places for maker USDC and four for taker shares.
     return maker_amount % 10_000 == 0 and taker_amount % 100 == 0
+
+
+def valid_market_sell_amount_precision(order: object) -> bool:
+    try:
+        maker_amount = int(getattr(order, "makerAmount"))
+        taker_amount = int(getattr(order, "takerAmount"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    # Market SELL orders invert the BUY precision rule: maker outcome-token
+    # shares may have four decimals, while taker pUSD remains cent precision.
+    return maker_amount % 100 == 0 and taker_amount % 10_000 == 0
+
+
+def submit_single_order(
+    value: dict[str, Any],
+    *,
+    side: str,
+    order_type: str,
+    success_code: str,
+) -> None:
+    token_id = required_string(value, "tokenId")
+    leg = required_string(value, "leg").upper()
+    price = required_probability(value, "price")
+    size = required_positive_number(value, "size")
+    if leg not in ("YES", "NO"):
+        unavailable("INVALID_REQUEST")
+
+    client = configured_client()
+    order = client.create_order(
+        OrderArgsV2(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            expiration=0,
+        )
+    )
+    precision_ok = (
+        valid_market_buy_amount_precision(order)
+        if side == "BUY"
+        else valid_market_sell_amount_precision(order)
+    )
+    if not precision_ok:
+        emit(
+            {
+                "ok": False,
+                "code": f"{side}_AMOUNT_PRECISION_INVALID",
+                "detail": "The signed rescue order does not meet Polymarket maker/taker precision limits.",
+                "orders": [{"leg": leg, "accepted": False, "orderId": None}],
+                "noOrdersAccepted": True,
+            }
+        )
+        return
+
+    response = client.post_order(
+        order,
+        order_type=order_type,
+        defer_exec=True,
+    )
+    diagnostic_log(f"【{side} {order_type} 救援單回傳結果】", response)
+    order_id = accepted_order_id(response)
+    explicitly_rejected = (
+        isinstance(response, dict)
+        and response.get("success") is False
+        and order_id is None
+    )
+    emit(
+        {
+            "ok": bool(order_id),
+            "code": success_code if order_id else f"{side}_{order_type}_REJECTED",
+            "orders": [
+                {
+                    "leg": leg,
+                    "accepted": bool(order_id),
+                    "orderId": order_id,
+                }
+            ],
+            "noOrdersAccepted": explicitly_rejected,
+        }
+    )
+
+
+def submit_fok_buy(value: dict[str, Any]) -> None:
+    submit_single_order(
+        value,
+        side="BUY",
+        order_type=OrderType.FOK,
+        success_code="RESCUE_FOK_BUY_ACCEPTED",
+    )
+
+
+def submit_fak_sell(value: dict[str, Any]) -> None:
+    submit_single_order(
+        value,
+        side="SELL",
+        order_type=OrderType.FAK,
+        success_code="RESCUE_FAK_SELL_ACCEPTED",
+    )
+
+
+def merge_capability(value: dict[str, Any]) -> None:
+    condition_id = required_string(value, "conditionId")
+    yes_token_id = required_string(value, "yesTokenId")
+    no_token_id = required_string(value, "noTokenId")
+    shares = required_positive_number(value, "size")
+    neg_risk = required_boolean(value, "negRisk")
+    if not condition_id.startswith("0x") or len(condition_id) != 66:
+        unavailable("INVALID_CONDITION_ID")
+    if not yes_token_id.isdigit() or not no_token_id.isdigit():
+        unavailable("INVALID_REQUEST")
+    amount = int(math.floor(shares * TOKEN_BASE_UNITS + 1e-6))
+    if amount <= 0:
+        unavailable("INVALID_REQUEST")
+
+    rpc_url = os.environ.get("POLYMARKET_MERGE_RPC_URL", "").strip()
+    private_key = os.environ.get("POLYMARKET_PRIVATE_KEY", "").strip()
+    funder = os.environ.get("POLYMARKET_FUNDER", "").strip()
+    if not rpc_url:
+        unavailable("MERGE_RPC_NOT_CONFIGURED")
+    if configured_signature_type() != 0:
+        unavailable("MERGE_REQUIRES_RELAYER")
+    if not private_key or not funder:
+        unavailable("AUTHENTICATION_NOT_CONFIGURED")
+
+    from eth_account import Account
+    import requests
+    from web3 import HTTPProvider, Web3
+
+    account = Account.from_key(private_key)
+    if account.address.lower() != funder.lower():
+        unavailable("MERGE_WALLET_OWNERSHIP_MISMATCH")
+    session = requests.Session()
+    session.trust_env = False
+    web3 = Web3(HTTPProvider(rpc_url, session=session, request_kwargs={"timeout": 12}))
+    if not web3.is_connected() or web3.eth.chain_id != POLYGON_CHAIN_ID:
+        unavailable("MERGE_RPC_UNAVAILABLE")
+    owner = Web3.to_checksum_address(account.address)
+    adapter_address = Web3.to_checksum_address(
+        NEG_RISK_CTF_COLLATERAL_ADAPTER_ADDRESS
+        if neg_risk
+        else CTF_COLLATERAL_ADAPTER_ADDRESS
+    )
+    ctf = web3.eth.contract(
+        address=Web3.to_checksum_address(CONDITIONAL_TOKENS_ADDRESS),
+        abi=[
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "account", "type": "address"},
+                    {"internalType": "address", "name": "operator", "type": "address"},
+                ],
+                "name": "isApprovedForAll",
+                "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+                "stateMutability": "view",
+                "type": "function",
+            }
+        ],
+    )
+    if not web3.eth.get_code(ctf.address) or not web3.eth.get_code(adapter_address):
+        unavailable("MERGE_CONTRACT_UNAVAILABLE")
+    approval_required = not ctf.functions.isApprovedForAll(owner, adapter_address).call()
+    reserved_gas = MERGE_GAS_RESERVE + (
+        APPROVAL_GAS_RESERVE if approval_required else 0
+    )
+    required_native_balance = (
+        web3.eth.gas_price * reserved_gas * GAS_RESERVE_MULTIPLIER
+    )
+    if web3.eth.get_balance(owner) < required_native_balance:
+        unavailable("MERGE_GAS_BALANCE_UNAVAILABLE")
+    emit(
+        {
+            "ok": True,
+            "code": "MERGE_CAPABLE",
+            "approvalRequired": approval_required,
+            "reservedGas": reserved_gas,
+        }
+    )
+
+
+def merge_positions(value: dict[str, Any]) -> None:
+    """Merge an exact complete set for a directly-owned EOA wallet.
+
+    Deposit/proxy wallets require Polymarket's gasless Relayer or Builder
+    authorization. This helper deliberately refuses to sign a direct Polygon
+    transaction unless the configured funder is the private-key EOA itself.
+    """
+
+    condition_id = required_string(value, "conditionId")
+    yes_token_id = required_string(value, "yesTokenId")
+    no_token_id = required_string(value, "noTokenId")
+    shares = required_positive_number(value, "size")
+    neg_risk = required_boolean(value, "negRisk")
+    if not condition_id.startswith("0x") or len(condition_id) != 66:
+        unavailable("INVALID_CONDITION_ID")
+
+    rpc_url = os.environ.get("POLYMARKET_MERGE_RPC_URL", "").strip()
+    private_key = os.environ.get("POLYMARKET_PRIVATE_KEY", "").strip()
+    funder = os.environ.get("POLYMARKET_FUNDER", "").strip()
+    if not rpc_url:
+        unavailable("MERGE_RPC_NOT_CONFIGURED")
+    if configured_signature_type() != 0:
+        unavailable("MERGE_REQUIRES_RELAYER")
+
+    from eth_account import Account
+    import requests
+    from web3 import HTTPProvider, Web3
+
+    account = Account.from_key(private_key)
+    if account.address.lower() != funder.lower():
+        unavailable("MERGE_WALLET_OWNERSHIP_MISMATCH")
+
+    amount = int(math.floor(shares * TOKEN_BASE_UNITS + 1e-6))
+    if amount <= 0:
+        unavailable("INVALID_REQUEST")
+
+    # Polygon RPC is unrelated to the geo-restricted CLOB endpoint. Keep the
+    # RPC session outside the residential proxy so SOCKS-only proxy plans do
+    # not break Web3's requests transport.
+    session = requests.Session()
+    session.trust_env = False
+    web3 = Web3(HTTPProvider(rpc_url, session=session, request_kwargs={"timeout": 12}))
+    if not web3.is_connected() or web3.eth.chain_id != POLYGON_CHAIN_ID:
+        unavailable("MERGE_RPC_UNAVAILABLE")
+
+    owner = Web3.to_checksum_address(account.address)
+    adapter_address = Web3.to_checksum_address(
+        NEG_RISK_CTF_COLLATERAL_ADAPTER_ADDRESS
+        if neg_risk
+        else CTF_COLLATERAL_ADAPTER_ADDRESS
+    )
+    ctf = web3.eth.contract(
+        address=Web3.to_checksum_address(CONDITIONAL_TOKENS_ADDRESS),
+        abi=[
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "account", "type": "address"},
+                    {"internalType": "uint256", "name": "id", "type": "uint256"},
+                ],
+                "name": "balanceOf",
+                "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function",
+            },
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "account", "type": "address"},
+                    {"internalType": "address", "name": "operator", "type": "address"},
+                ],
+                "name": "isApprovedForAll",
+                "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+                "stateMutability": "view",
+                "type": "function",
+            },
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "operator", "type": "address"},
+                    {"internalType": "bool", "name": "approved", "type": "bool"},
+                ],
+                "name": "setApprovalForAll",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function",
+            },
+        ],
+    )
+    adapter = web3.eth.contract(
+        address=adapter_address,
+        abi=[
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "collateralToken", "type": "address"},
+                    {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+                    {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
+                    {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"},
+                    {"internalType": "uint256", "name": "amount", "type": "uint256"},
+                ],
+                "name": "mergePositions",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function",
+            }
+        ],
+    )
+
+    yes_before = ctf.functions.balanceOf(owner, int(yes_token_id)).call()
+    no_before = ctf.functions.balanceOf(owner, int(no_token_id)).call()
+    if yes_before < amount or no_before < amount:
+        emit(
+            {
+                "ok": False,
+                "code": "MERGE_BALANCE_INSUFFICIENT",
+                "yesBalanceBaseUnits": str(yes_before),
+                "noBalanceBaseUnits": str(no_before),
+                "requiredBaseUnits": str(amount),
+            }
+        )
+        return
+
+    def send_transaction(function: Any) -> str:
+        nonce = web3.eth.get_transaction_count(owner, "pending")
+        transaction = function.build_transaction(
+            {
+                "from": owner,
+                "chainId": POLYGON_CHAIN_ID,
+                "nonce": nonce,
+                "gasPrice": web3.eth.gas_price,
+            }
+        )
+        estimated = web3.eth.estimate_gas(transaction)
+        transaction["gas"] = max(estimated, math.ceil(estimated * 1.2))
+        signed = account.sign_transaction(transaction)
+        tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=45)
+        if receipt.status != 1:
+            unavailable("MERGE_TRANSACTION_REVERTED")
+        return tx_hash.hex()
+
+    approval_tx_hash = None
+    if not ctf.functions.isApprovedForAll(owner, adapter_address).call():
+        approval_tx_hash = send_transaction(
+            ctf.functions.setApprovalForAll(adapter_address, True)
+        )
+
+    merge_tx_hash = send_transaction(
+        adapter.functions.mergePositions(
+            Web3.to_checksum_address(PUSD_ADDRESS),
+            bytes(32),
+            bytes.fromhex(condition_id[2:]),
+            [1, 2],
+            amount,
+        )
+    )
+    yes_after = ctf.functions.balanceOf(owner, int(yes_token_id)).call()
+    no_after = ctf.functions.balanceOf(owner, int(no_token_id)).call()
+    confirmed = yes_before - yes_after >= amount and no_before - no_after >= amount
+    emit(
+        {
+            "ok": confirmed,
+            "code": "MERGE_CONFIRMED" if confirmed else "MERGE_BALANCE_UNCONFIRMED",
+            "mergeTxHash": merge_tx_hash,
+            "approvalTxHash": approval_tx_hash,
+            "mergedBaseUnits": str(amount),
+        }
+    )
 
 
 def submit_pair(value: dict[str, Any]) -> None:
@@ -289,6 +655,10 @@ def get_orders(value: dict[str, Any]) -> None:
                     "orderId": order_id,
                     "status": str(response.get("status") or "UNKNOWN"),
                     "sizeMatched": response.get("size_matched") or response.get("sizeMatched"),
+                    "originalSize": response.get("original_size") or response.get("originalSize"),
+                    "price": response.get("price"),
+                    "side": response.get("side"),
+                    "tokenId": response.get("asset_id") or response.get("token_id"),
                 }
             )
     emit({"ok": True, "code": "ORDER_STATUS", "orders": orders})
@@ -300,6 +670,14 @@ def main() -> None:
     try:
         if action == "submit_pair":
             submit_pair(value)
+        elif action == "submit_fok_buy":
+            submit_fok_buy(value)
+        elif action == "submit_fak_sell":
+            submit_fak_sell(value)
+        elif action == "merge_capability":
+            merge_capability(value)
+        elif action == "merge_positions":
+            merge_positions(value)
         elif action == "cancel_orders":
             cancel_orders(value)
         elif action == "get_orders":

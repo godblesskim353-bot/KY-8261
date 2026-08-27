@@ -319,7 +319,7 @@ components:
           type: boolean
         state:
           type: string
-          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, FILLED, HALTED]
+          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, RECOVERING, MERGING, FILLED, HALTED]
         reason:
           type: string
         lastActionAt:
@@ -337,7 +337,13 @@ components:
           type: [number, "null"]
         plannedCostPusd:
           type: [number, "null"]
-      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, yesOrderId, noOrderId, unresolvedLeg, plannedShares, plannedCostPusd]
+        recoveryAction:
+          type: [string, "null"]
+        recoveryOrderId:
+          type: [string, "null"]
+        mergeTxHash:
+          type: [string, "null"]
+      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, yesOrderId, noOrderId, unresolvedLeg, plannedShares, plannedCostPusd, recoveryAction, recoveryOrderId, mergeTxHash]
     PolymarketOpportunityLog:
       type: object
       properties:

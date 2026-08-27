@@ -39,6 +39,7 @@ type ActiveMarket = {
   yesTokenId: string | null;
   noTokenId: string | null;
   endAt: number | null;
+  negRisk: boolean;
   configured: boolean;
 };
 
@@ -119,6 +120,7 @@ function configuredMarket() {
     yesTokenId,
     noTokenId,
     endAt: null,
+    negRisk: false,
     configured: Boolean(conditionId && yesTokenId && noTokenId),
   };
 }
@@ -150,6 +152,7 @@ function activeMarketFromGamma(value: unknown): ActiveMarket | null {
   const downIndex = outcomes.findIndex((outcome) => outcome.toLowerCase() === "down");
   const conditionId = stringOrNull(record.conditionId ?? record.condition_id);
   const endDate = stringOrNull(record.endDate ?? record.end_date_iso);
+  const negRisk = record.negRisk === true || record.neg_risk === true;
   const endAt = endDate ? Date.parse(endDate) : Number.NaN;
   if (
     !conditionId ||
@@ -167,6 +170,7 @@ function activeMarketFromGamma(value: unknown): ActiveMarket | null {
     yesTokenId: tokenIds[upIndex],
     noTokenId: tokenIds[downIndex],
     endAt,
+    negRisk,
     configured: true,
   };
 }
@@ -739,6 +743,7 @@ class LiveMarketDataSupervisor {
         yesTokenId: market.yesTokenId,
         noTokenId: market.noTokenId,
         endAt: market.endAt,
+        negRisk: market.negRisk,
       },
       quotes: {
         yesBestAsk: yes?.price ?? null,
@@ -772,6 +777,7 @@ class LiveMarketDataSupervisor {
             yesTokenId: null,
             noTokenId: null,
             endAt: null,
+            negRisk: false,
             configured: false,
           };
           this.books.clear();
