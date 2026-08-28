@@ -14,11 +14,20 @@ import {
   type AutomaticPairExecutionStatus,
   type PairExecutionCandidate,
 } from "./automatic-pair-execution";
-import { OpportunityLogStore, OPPORTUNITY_LOG_THRESHOLD_PUSD, type OpportunityLogEntry } from "./opportunity-log";
+import {
+  aggressiveVolumeAfterWall,
+  isBinanceEntryConfirmed,
+  topThreeDepthDirection,
+  type BinanceAggressiveTrade,
+  type BinanceDepthLevel,
+} from "./binance-signal";
 
 const execFileAsync = promisify(execFile);
 const CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
-const BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade";
+// USD-M perpetual depth and aggregate trades are subscribed together so a
+// directional signal is based solely on Binance microstructure.
+const BINANCE_WS_URL =
+  "wss://fstream.binance.com/stream?streams=btcusdt@depth5@100ms/btcusdt@aggTrade";
 const POSITIONS_URL = "https://data-api.polymarket.com/positions";
 const GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets";
 const FRESHNESS_MS = 8_000;
@@ -98,6 +107,10 @@ export type LiveMarketSnapshot = {
     selectedDirection: Direction | null;
     confirmed: boolean;
     reason: string;
+    topThreeImbalanceRatio: number | null;
+    aggressiveBuyVolumeBtc: number;
+    aggressiveSellVolumeBtc: number;
+    wallObservedAt: string | null;
   };
   wallet: {
     balancePusd: number | null;
@@ -603,6 +616,10 @@ class LiveMarketDataSupervisor {
   private spot: number | null = null;
   private spotAt: number | null = null;
   private spotHistory: Array<{ price: number; at: number }> = [];
+  private binanceBids: BinanceDepthLevel[] = [];
+  private binanceAsks: BinanceDepthLevel[] = [];
+  private aggressiveTrades: BinanceAggressiveTrade[] = [];
+  private binanceWall: { direction: Direction; at: number } | null = null;
   private books = new Map<string, TokenBook>();
   private clobConnected = false;
   private clobAt: number | null = null;
@@ -612,7 +629,6 @@ class LiveMarketDataSupervisor {
   private wallet = { balancePusd: null as number | null, source: "AUTHENTICATION_NOT_CONFIGURED", at: null as number | null };
   private inventory = { yes: null as number | null, no: null as number | null, atRisk: null as number | null, source: "WALLET_NOT_CONFIGURED", at: null as number | null };
   private execution = new AutomaticPairExecutionSupervisor();
-  private opportunityLog = new OpportunityLogStore();
 
   start() {
     if (this.started) return;
@@ -626,10 +642,11 @@ class LiveMarketDataSupervisor {
     marketTimer.unref();
     const executionTimer = setInterval(() => {
       const candidate = this.executionCandidate();
-      void this.execution.evaluate(candidate).then(() => {
-        this.opportunityLog.observe(candidate, this.execution.snapshot());
-      });
-    }, 500);
+      void this.execution.evaluate(candidate);
+    // The active dual-track state must see CLOB/Binance transitions promptly.
+    // The supervisor serializes lifecycle work, so overlapping ticks cannot
+    // create duplicate submissions.
+    }, 10);
     executionTimer.unref();
   }
 
@@ -651,7 +668,7 @@ class LiveMarketDataSupervisor {
     const edge = combinedAsk === null ? null : 1 - combinedAsk;
     const momentum1sPct = this.spotChangePct(1_000);
     const change60sPct = this.spotChangePct(60_000);
-    const signal = this.directionSignal(momentum1sPct);
+    const signal = this.directionSignal();
     const balance = this.wallet.balancePusd;
     const compound =
       balance !== null && commonDepth !== null && yes && no && quotesFresh
@@ -757,10 +774,6 @@ class LiveMarketDataSupervisor {
     return this.execution.pause();
   }
 
-  opportunities(): { thresholdPusd: number; entries: OpportunityLogEntry[] } {
-    return { thresholdPusd: OPPORTUNITY_LOG_THRESHOLD_PUSD, entries: this.opportunityLog.list() };
-  }
-
   private spotChangePct(windowMs: number): number | null {
     const windowStart = this.spotHistory.find(
       (point) => point.at >= Date.now() - windowMs,
@@ -807,11 +820,13 @@ class LiveMarketDataSupervisor {
         combinedAsk: yes && no ? yes.price + no.price : null,
         fresh,
       },
-      signal: this.directionSignal(momentum1sPct),
+      signal: this.directionSignal(),
       walletBalancePusd: this.wallet.balancePusd,
+      walletFresh: isFresh(this.wallet.at),
       inventory: {
         yesShares: this.inventory.yes,
         noShares: this.inventory.no,
+        fresh: isFresh(this.inventory.at),
       },
     };
   }
@@ -883,16 +898,44 @@ class LiveMarketDataSupervisor {
       },
       (message) => {
         try {
-          const payload = JSON.parse(message) as Record<string, unknown>;
+          const envelope = JSON.parse(message) as Record<string, unknown>;
+          const payload =
+            envelope.data && typeof envelope.data === "object"
+              ? (envelope.data as Record<string, unknown>)
+              : envelope;
           const price = numberOrNull(payload.p ?? payload.c);
           const eventAt = numberOrNull(payload.E) ?? Date.now();
-          if (price === null || price <= 0) return;
-          this.spot = price;
-          this.spotAt = eventAt;
-          this.spotHistory.push({ price, at: eventAt });
-          this.spotHistory = this.spotHistory.filter(
-            (point) => point.at >= Date.now() - 65_000,
-          );
+          const eventType = String(payload.e ?? "").toLowerCase();
+          if (eventType === "depthupdate") {
+            const bids = this.binanceLevels(payload.b);
+            const asks = this.binanceLevels(payload.a);
+            if (!bids.length || !asks.length) return;
+            this.binanceBids = bids;
+            this.binanceAsks = asks;
+            const wall = topThreeDepthDirection(bids, asks);
+            this.binanceWall =
+              wall.direction === null
+                ? null
+                : this.binanceWall?.direction === wall.direction
+                  ? this.binanceWall
+                  : { direction: wall.direction, at: eventAt };
+          } else if (eventType === "aggtrade") {
+            const quantityBtc = numberOrNull(payload.q);
+            const buyerIsMaker = payload.m;
+            if (quantityBtc === null || quantityBtc <= 0 || typeof buyerIsMaker !== "boolean") return;
+            this.aggressiveTrades.push({
+              direction: buyerIsMaker ? "DOWN" : "UP",
+              quantityBtc,
+              at: eventAt,
+            });
+            this.aggressiveTrades = this.aggressiveTrades.filter((trade) => trade.at >= Date.now() - 1_000);
+          }
+          if (price !== null && price > 0) {
+            this.spot = price;
+            this.spotAt = eventAt;
+            this.spotHistory.push({ price, at: eventAt });
+            this.spotHistory = this.spotHistory.filter((point) => point.at >= Date.now() - 65_000);
+          }
           this.sequence += 1;
           void this.execution.evaluate(this.executionCandidate());
         } catch {
@@ -1060,66 +1103,35 @@ class LiveMarketDataSupervisor {
     return Number(depth.toFixed(4));
   }
 
-  private directionSignal(momentum1sPct: number | null): LiveMarketSnapshot["signal"] {
-    const market = this.activeMarket;
-    const yesBidDepth = market.yesTokenId ? this.nearDepth(market.yesTokenId, "BID") : null;
-    const yesAskDepth = market.yesTokenId ? this.nearDepth(market.yesTokenId, "ASK") : null;
-    const noBidDepth = market.noTokenId ? this.nearDepth(market.noTokenId, "BID") : null;
-    const noAskDepth = market.noTokenId ? this.nearDepth(market.noTokenId, "ASK") : null;
-    const btcDirection: Direction | null =
-      momentum1sPct === null || momentum1sPct === 0
-        ? null
-        : momentum1sPct > 0
-          ? "UP"
-          : "DOWN";
-    let bookDirection: Direction | null = null;
-    if (
-      yesBidDepth !== null &&
-      yesAskDepth !== null &&
-      noBidDepth !== null &&
-      noAskDepth !== null
-    ) {
-      const upPressure = yesBidDepth / Math.max(yesAskDepth, 0.0001);
-      const downPressure = noBidDepth / Math.max(noAskDepth, 0.0001);
-      bookDirection =
-        upPressure >= downPressure * 1.15
-          ? "UP"
-          : downPressure >= upPressure * 1.15
-            ? "DOWN"
-            : null;
-    }
+  private binanceLevels(value: unknown): BinanceDepthLevel[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((level) => this.parseLevel(level))
+      .filter((level): level is BinanceDepthLevel => level !== null && level.size > 0);
+  }
 
-    const selectedDirection = btcDirection ?? bookDirection;
-    if (!selectedDirection) {
-      const bookIncomplete =
-        yesBidDepth === null ||
-        yesAskDepth === null ||
-        noBidDepth === null ||
-        noAskDepth === null;
-      return {
-        btcDirection: null,
-        bookDirection,
-        selectedDirection: null,
-        confirmed: false,
-        reason: bookIncomplete
-          ? "Waiting for a non-flat BTC 1-second move or complete Up/Down orderbook imbalance."
-          : "BTC 1-second momentum is flat and Polymarket orderbook imbalance is unclear.",
-      };
-    }
-
-    const reason = btcDirection
-      ? bookDirection === btcDirection
-        ? `BTC 1-second momentum and Polymarket imbalance both point ${btcDirection}.`
-        : bookDirection
-          ? `BTC 1-second momentum points ${btcDirection}; it takes priority over conflicting ${bookDirection} book imbalance.`
-          : `BTC 1-second momentum points ${btcDirection}; using the breakout direction immediately.`
-      : `BTC 1-second momentum is flat; Polymarket orderbook imbalance selects ${bookDirection}.`;
+  private directionSignal(): LiveMarketSnapshot["signal"] {
+    const wall = topThreeDepthDirection(this.binanceBids, this.binanceAsks);
+    const wallObservedAt = this.binanceWall?.direction === wall.direction ? this.binanceWall.at : null;
+    const buyVolume = aggressiveVolumeAfterWall(this.aggressiveTrades, "UP", wallObservedAt);
+    const sellVolume = aggressiveVolumeAfterWall(this.aggressiveTrades, "DOWN", wallObservedAt);
+    const selectedDirection = wall.direction;
+    const aggressiveVolume = selectedDirection === "UP" ? buyVolume : sellVolume;
+    const confirmed = isBinanceEntryConfirmed(selectedDirection, aggressiveVolume);
     return {
-      btcDirection,
-      bookDirection,
-      selectedDirection,
-      confirmed: true,
-      reason,
+      btcDirection: selectedDirection,
+      bookDirection: selectedDirection,
+      selectedDirection: confirmed ? selectedDirection : null,
+      confirmed,
+      topThreeImbalanceRatio: wall.ratio,
+      aggressiveBuyVolumeBtc: Number(buyVolume.toFixed(4)),
+      aggressiveSellVolumeBtc: Number(sellVolume.toFixed(4)),
+      wallObservedAt: asIso(wallObservedAt),
+      reason: selectedDirection === null
+        ? "Waiting for Binance perpetual top-three depth imbalance of at least 4x."
+        : confirmed
+          ? `Binance ${selectedDirection} top-three depth wall is ${wall.ratio?.toFixed(2)}x and ${aggressiveVolume.toFixed(4)} BTC aggressive flow confirmed within 50 ms.`
+          : `Binance ${selectedDirection} top-three depth wall is ${wall.ratio?.toFixed(2)}x; waiting for more than 10 BTC same-direction aggressive flow within 50 ms.`,
     };
   }
 

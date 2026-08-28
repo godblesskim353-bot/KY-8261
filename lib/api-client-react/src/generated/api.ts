@@ -28,7 +28,6 @@ import type {
   PolymarketExecution,
   PolymarketLiveSnapshot,
   PolymarketMarket,
-  PolymarketOpportunityLog,
   PolymarketStatus
 } from './api.schemas';
 
@@ -576,83 +575,6 @@ export function useGetPolymarketCompound<TData = Awaited<ReturnType<typeof getPo
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetPolymarketCompoundQueryOptions(params,options)
-
-  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
-
-  return withQueryKey(query, queryOptions.queryKey);
-}
-
-
-
-
-
-
-
-export const getGetPolymarketOpportunitiesUrl = () => {
-
-
-
-
-  return `/api/polymarket/opportunities`
-}
-
-/**
- * @summary List recent BTC pair opportunities the bot observed, whether or not a trade was executed
- */
-export const getPolymarketOpportunities = async ( options?: Parameters<typeof customFetch>[1]): Promise<PolymarketOpportunityLog> => {
-
-  return customFetch<PolymarketOpportunityLog>(getGetPolymarketOpportunitiesUrl(),
-  {
-    ...options,
-    method: 'GET'
-
-
-  }
-);}
-
-
-
-
-
-export const getGetPolymarketOpportunitiesQueryKey = () => {
-    return [
-    `/api/polymarket/opportunities`
-    ] as const;
-    }
-
-
-export const getGetPolymarketOpportunitiesQueryOptions = <TData = Awaited<ReturnType<typeof getPolymarketOpportunities>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getPolymarketOpportunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
-) => {
-
-const {query: queryOptions, request: requestOptions} = options ?? {};
-
-  const queryKey =  queryOptions?.queryKey ?? getGetPolymarketOpportunitiesQueryKey();
-
-
-
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getPolymarketOpportunities>>> = ({ signal }) => getPolymarketOpportunities({ signal, ...requestOptions });
-
-
-
-
-
-   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getPolymarketOpportunities>>, TError, TData> & { queryKey: QueryKey }
-}
-
-export type GetPolymarketOpportunitiesQueryResult = NonNullable<Awaited<ReturnType<typeof getPolymarketOpportunities>>>
-export type GetPolymarketOpportunitiesQueryError = ErrorType<unknown>
-
-
-/**
- * @summary List recent BTC pair opportunities the bot observed, whether or not a trade was executed
- */
-
-export function useGetPolymarketOpportunities<TData = Awaited<ReturnType<typeof getPolymarketOpportunities>>, TError = ErrorType<unknown>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getPolymarketOpportunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
-
- ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-
-  const queryOptions = getGetPolymarketOpportunitiesQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

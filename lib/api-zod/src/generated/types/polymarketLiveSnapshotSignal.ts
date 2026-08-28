@@ -18,4 +18,12 @@ export type PolymarketLiveSnapshotSignal = {
   selectedDirection: PolymarketLiveSnapshotSignalSelectedDirection;
   confirmed: boolean;
   reason: string;
+  /** @nullable */
+  topThreeImbalanceRatio: number | null;
+  /** @minimum 0 */
+  aggressiveBuyVolumeBtc: number;
+  /** @minimum 0 */
+  aggressiveSellVolumeBtc: number;
+  /** @nullable */
+  wallObservedAt: Date | null;
 };

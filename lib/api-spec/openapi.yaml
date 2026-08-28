@@ -126,18 +126,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-  /polymarket/opportunities:
-    get:
-      operationId: getPolymarketOpportunities
-      tags: [polymarket]
-      summary: List recent BTC pair opportunities the bot observed, whether or not a trade was executed
-      responses:
-        "200":
-          description: Opportunity occurrence log
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PolymarketOpportunityLog"
   /polymarket/market:
     get:
       operationId: getPolymarketMarket
@@ -297,7 +285,11 @@ components:
             selectedDirection: { type: [string, "null"], enum: [UP, DOWN, null] }
             confirmed: { type: boolean }
             reason: { type: string }
-          required: [btcDirection, bookDirection, selectedDirection, confirmed, reason]
+            topThreeImbalanceRatio: { type: [number, "null"] }
+            aggressiveBuyVolumeBtc: { type: number, minimum: 0 }
+            aggressiveSellVolumeBtc: { type: number, minimum: 0 }
+            wallObservedAt: { type: [string, "null"], format: date-time }
+          required: [btcDirection, bookDirection, selectedDirection, confirmed, reason, topThreeImbalanceRatio, aggressiveBuyVolumeBtc, aggressiveSellVolumeBtc, wallObservedAt]
         wallet:
           type: object
           properties:
@@ -332,14 +324,14 @@ components:
       properties:
         mode:
           type: string
-          enum: [CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK]
+          enum: [BINANCE_DUAL_TRACK_FAK_GTC]
         enabled:
           type: boolean
         armed:
           type: boolean
         state:
           type: string
-          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, WAITING_FOR_TAKE_PROFIT, EXITING, EXIT_RETRYING, FILLED, HALTED]
+          enum: [DISABLED, PAUSED, WAITING_FOR_MARKET, ARMED, SUBMITTING, VERIFYING, PLACING_DEFENSE, WAITING_DUAL_TRACK, CANCELING_DEFENSE, TRACK_C_SUBMITTING, TRACK_C_WAITING_TAKE_PROFIT, EXITING, SETTLEMENT_WAIT, FILLED, HALTED]
         reason:
           type: string
         lastActionAt:
@@ -352,6 +344,10 @@ components:
           enum: [UP, DOWN, null]
         entryOrderId:
           type: [string, "null"]
+        defenseOrderId:
+          type: [string, "null"]
+        secondEntryOrderId:
+          type: [string, "null"]
         exitOrderId:
           type: [string, "null"]
         unresolvedOrder:
@@ -362,78 +358,33 @@ components:
           type: [number, "null"]
         entryPricePusd:
           type: [number, "null"]
+        defensePricePusd:
+          type: [number, "null"]
+        defenseShares:
+          type: [number, "null"]
+        defenseMatchedShares:
+          type: [number, "null"]
         takeProfitPricePusd:
           type: [number, "null"]
         remainingShares:
           type: [number, "null"]
-        exitSellFloorPusd:
+        secondSide:
+          type: [string, "null"]
+          enum: [UP, DOWN, null]
+        secondShares:
           type: [number, "null"]
-        exitTriggered:
-          type: boolean
+        secondEntryPricePusd:
+          type: [number, "null"]
+        secondTargetPusd:
+          type: [number, "null"]
         directionReason:
           type: [string, "null"]
-        entryCombinedAskPusd:
-          type: [number, "null"]
-        lastExitError:
+        branch:
           type: [string, "null"]
-        lastAttemptAt:
+          enum: [A, B, C, null]
+        lastError:
           type: [string, "null"]
-          format: date-time
-        lastAttemptCombinedAsk:
-          type: [number, "null"]
-        lastAttemptOutcome:
-          type: [string, "null"]
-      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, side, entryOrderId, exitOrderId, unresolvedOrder, plannedShares, plannedCostPusd, entryPricePusd, takeProfitPricePusd, remainingShares, exitSellFloorPusd, exitTriggered, directionReason, entryCombinedAskPusd, lastExitError, lastAttemptAt, lastAttemptCombinedAsk, lastAttemptOutcome]
-    PolymarketOpportunityLog:
-      type: object
-      properties:
-        thresholdPusd:
-          type: number
-        entries:
-          type: array
-          items:
-            $ref: "#/components/schemas/PolymarketOpportunity"
-      required: [thresholdPusd, entries]
-    PolymarketOpportunity:
-      type: object
-      properties:
-        id: { type: string }
-        conditionId: { type: [string, "null"] }
-        openedAt: { type: string, format: date-time }
-        closedAt: { type: [string, "null"], format: date-time }
-        thresholdPusd: { type: number }
-        entryCombinedAskPusd: { type: number }
-        minCombinedAskPusd: { type: number }
-        yesBestAskAtOpen: { type: [number, "null"] }
-        noBestAskAtOpen: { type: [number, "null"] }
-        durationBelowThresholdMs: { type: number }
-        outcome:
-          type: string
-          enum: [OPEN, EXECUTED, NOT_EXECUTED]
-        reason: { type: [string, "null"] }
-        rejectionInference: { type: [string, "null"] }
-        shares: { type: [number, "null"] }
-        costPusd: { type: [number, "null"] }
-        yesOrderId: { type: [string, "null"] }
-        noOrderId: { type: [string, "null"] }
-      required:
-        - id
-        - conditionId
-        - openedAt
-        - closedAt
-        - thresholdPusd
-        - entryCombinedAskPusd
-        - minCombinedAskPusd
-        - yesBestAskAtOpen
-        - noBestAskAtOpen
-        - durationBelowThresholdMs
-        - outcome
-        - reason
-        - rejectionInference
-        - shares
-        - costPusd
-        - yesOrderId
-        - noOrderId
+      required: [mode, enabled, armed, state, reason, lastActionAt, conditionId, side, entryOrderId, defenseOrderId, secondEntryOrderId, exitOrderId, unresolvedOrder, plannedShares, plannedCostPusd, entryPricePusd, defensePricePusd, defenseShares, defenseMatchedShares, takeProfitPricePusd, remainingShares, secondSide, secondShares, secondEntryPricePusd, secondTargetPusd, directionReason, branch, lastError]
     PolymarketMarket:
       type: object
       properties:

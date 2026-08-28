@@ -5,7 +5,9 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { PolymarketExecutionBranch } from './polymarketExecutionBranch';
 import type { PolymarketExecutionMode } from './polymarketExecutionMode';
+import type { PolymarketExecutionSecondSide } from './polymarketExecutionSecondSide';
 import type { PolymarketExecutionSide } from './polymarketExecutionSide';
 import type { PolymarketExecutionState } from './polymarketExecutionState';
 
@@ -24,6 +26,10 @@ export interface PolymarketExecution {
   /** @nullable */
   entryOrderId: string | null;
   /** @nullable */
+  defenseOrderId: string | null;
+  /** @nullable */
+  secondEntryOrderId: string | null;
+  /** @nullable */
   exitOrderId: string | null;
   unresolvedOrder: boolean;
   /** @nullable */
@@ -33,22 +39,27 @@ export interface PolymarketExecution {
   /** @nullable */
   entryPricePusd: number | null;
   /** @nullable */
+  defensePricePusd: number | null;
+  /** @nullable */
+  defenseShares: number | null;
+  /** @nullable */
+  defenseMatchedShares: number | null;
+  /** @nullable */
   takeProfitPricePusd: number | null;
   /** @nullable */
   remainingShares: number | null;
   /** @nullable */
-  exitSellFloorPusd: number | null;
-  exitTriggered: boolean;
+  secondSide: PolymarketExecutionSecondSide;
+  /** @nullable */
+  secondShares: number | null;
+  /** @nullable */
+  secondEntryPricePusd: number | null;
+  /** @nullable */
+  secondTargetPusd: number | null;
   /** @nullable */
   directionReason: string | null;
   /** @nullable */
-  entryCombinedAskPusd: number | null;
+  branch: PolymarketExecutionBranch;
   /** @nullable */
-  lastExitError: string | null;
-  /** @nullable */
-  lastAttemptAt: Date | null;
-  /** @nullable */
-  lastAttemptCombinedAsk: number | null;
-  /** @nullable */
-  lastAttemptOutcome: string | null;
+  lastError: string | null;
 }

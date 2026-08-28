@@ -10,5 +10,5 @@ export type PolymarketExecutionMode = typeof PolymarketExecutionMode[keyof typeo
 
 
 export const PolymarketExecutionMode = {
-  CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK: 'CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK',
+  BINANCE_DUAL_TRACK_FAK_GTC: 'BINANCE_DUAL_TRACK_FAK_GTC',
 } as const;

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Single-leg Polymarket CLOB bridge for the directional BTC bot.
+"""Polymarket CLOB bridge for the Binance-driven dual-track BTC bot.
 
-The Node supervisor uses this bridge for one market-style FAK BUY and repeated
-market-style FAK SELL orders at the live best bid. It intentionally contains no pair
-submission, Merge, or missing-leg recovery path. stdout is a JSON protocol;
-diagnostics stay on stderr.
+The Node supervisor uses this bridge for market-style FAK orders, one resting
+opposite-side GTC defense order, status reconciliation, and confirmed cancellation.
+stdout is a JSON protocol; diagnostics stay on stderr.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ if _proxy:
     os.environ["HTTPS_PROXY"] = _proxy
 
 from py_clob_client_v2 import ClobClient, OrderArgsV2, OrderType
+from py_clob_client_v2.clob_types import OpenOrderParams, TradeParams
 
 
 CLOB_HOST = "https://clob.polymarket.com"
@@ -156,6 +156,9 @@ def submit_single_order(value: dict[str, Any], *, side: str, order_type: str, su
     direction = required_string(value, "leg").upper()
     price = required_probability(value, "price")
     size = required_positive_number(value, "size")
+    client_id = required_string(value, "clientId")
+    if not client_id.startswith("0x") or len(client_id) != 66:
+        unavailable("INVALID_CLIENT_ID")
     if direction not in ("UP", "DOWN"):
         unavailable("INVALID_REQUEST")
 
@@ -167,6 +170,9 @@ def submit_single_order(value: dict[str, Any], *, side: str, order_type: str, su
             size=size,
             side=side,
             expiration=0,
+            # Installed py-clob-client-v2 OrderArgsV2 exposes metadata bytes32.
+            # It is signed into the deterministic order and is our recovery key.
+            metadata=client_id,
         )
     )
     precision_ok = (
@@ -222,6 +228,15 @@ def submit_fak_sell(value: dict[str, Any]) -> None:
     )
 
 
+def submit_gtc_buy(value: dict[str, Any]) -> None:
+    submit_single_order(
+        value,
+        side="BUY",
+        order_type=OrderType.GTC,
+        success_code="GTC_DEFENSE_BUY_ACCEPTED",
+    )
+
+
 def cancel_orders(value: dict[str, Any]) -> None:
     raw_ids = value.get("orderIds")
     if not isinstance(raw_ids, list):
@@ -262,11 +277,20 @@ def get_orders(value: dict[str, Any]) -> None:
         response = client.get_order(order_id)
         diagnostic_log("【order status response】", {"orderId": order_id, "response": response})
         if isinstance(response, dict):
+            executed_price = response.get("avg_price") or response.get("average_price") or response.get("averagePrice") or response.get("matched_price")
+            if executed_price is None:
+                executed_price = executed_vwap_for_order(
+                    client.get_trades(TradeParams(asset_id=response.get("asset_id") or response.get("token_id"))),
+                    order_id,
+                )
             orders.append(
                 {
                     "orderId": order_id,
                     "status": str(response.get("status") or "UNKNOWN"),
                     "sizeMatched": response.get("size_matched") or response.get("sizeMatched"),
+                    # `price` is a resting limit, not a proven execution price.
+                    # Only expose fields supplied by CLOB as execution averages.
+                    "executedPrice": executed_price,
                     "originalSize": response.get("original_size") or response.get("originalSize"),
                     "price": response.get("price"),
                     "side": response.get("side"),
@@ -274,6 +298,65 @@ def get_orders(value: dict[str, Any]) -> None:
                 }
             )
     emit({"ok": True, "code": "ORDER_STATUS", "orders": orders})
+
+
+def executed_vwap_for_order(trades: object, order_id: str) -> float | None:
+    """VWAP only fills carrying an exact taker_order_id or maker order_id link.
+
+    py-clob-client-v2 TradeParams can filter by asset/market but not order ID, so
+    every returned trade is inspected and unrelated fills are deliberately ignored.
+    """
+    fills: list[tuple[float, float]] = []
+    for trade in trades if isinstance(trades, list) else []:
+        if not isinstance(trade, dict):
+            continue
+        if trade.get("taker_order_id") == order_id or trade.get("takerOrderId") == order_id:
+            price = trade.get("price")
+            quantity = trade.get("size") or trade.get("amount") or trade.get("size_matched")
+            try:
+                if float(price) > 0 and float(quantity) > 0:
+                    fills.append((float(price), float(quantity)))
+            except (TypeError, ValueError):
+                pass
+        makers = trade.get("maker_orders") or trade.get("makerOrders") or []
+        for maker in makers if isinstance(makers, list) else []:
+            if not isinstance(maker, dict) or (maker.get("order_id") or maker.get("orderId")) != order_id:
+                continue
+            price = maker.get("price")
+            quantity = maker.get("matched_amount") or maker.get("size_matched") or maker.get("size")
+            try:
+                if float(price) > 0 and float(quantity) > 0:
+                    fills.append((float(price), float(quantity)))
+            except (TypeError, ValueError):
+                pass
+    total = sum(quantity for _, quantity in fills)
+    return sum(price * quantity for price, quantity in fills) / total if total > 0 else None
+
+
+def recover_order(value: dict[str, Any]) -> None:
+    client_id = required_string(value, "clientId")
+    token_id = required_string(value, "tokenId")
+    client = configured_client()
+    candidates: dict[str, dict[str, Any]] = {}
+    for order in client.get_open_orders(OpenOrderParams(asset_id=token_id)):
+        if isinstance(order, dict) and order.get("metadata") == client_id:
+            order_id = order.get("id") or order.get("orderID") or order.get("order_id")
+            if isinstance(order_id, str):
+                candidates[order_id] = order
+    # Realistic v2 trade responses identify constituent maker/taker orders.
+    for trade in client.get_trades(TradeParams(asset_id=token_id)):
+        if not isinstance(trade, dict):
+            continue
+        for item in [trade, *(trade.get("maker_orders") or [])]:
+            if isinstance(item, dict) and item.get("metadata") == client_id:
+                order_id = item.get("order_id") or item.get("id")
+                if isinstance(order_id, str):
+                    candidates[order_id] = item
+    if len(candidates) != 1:
+        emit({"ok": False, "code": "RECOVERY_NOT_UNIQUE", "detail": f"{len(candidates)} matching orders"})
+        return
+    order_id = next(iter(candidates))
+    emit({"ok": True, "code": "ORDER_RECOVERED", "orders": [{"orderId": order_id}]})
 
 
 def main() -> None:
@@ -284,10 +367,14 @@ def main() -> None:
             submit_fak_buy(value)
         elif action == "submit_fak_sell":
             submit_fak_sell(value)
+        elif action == "submit_gtc_buy":
+            submit_gtc_buy(value)
         elif action == "cancel_orders":
             cancel_orders(value)
         elif action == "get_orders":
             get_orders(value)
+        elif action == "recover_order":
+            recover_order(value)
         else:
             unavailable("INVALID_ACTION")
     except SystemExit:

@@ -8,3 +8,5 @@
 - [Residential proxy is a local sidecar](residential-proxy-local-sidecar.md) — RESIDENTIAL_PROXY_URL resolves to 127.0.0.1 on Replit; never copy it verbatim to a self-hosted deployment.
 - [Proxy protocol mismatch (SOCKS5)](proxy-protocol-mismatch-socks5.md) — a proxy reachable by curl can still hang a hand-rolled HTTP-CONNECT-only tunnel if the plan is SOCKS5-only; add a protocol branch, don't just swap URLs.
 - [Python HTTP client + PATH-command pitfalls](python-http-client-portability.md) — `existsSync()` can't validate a bare PATH command like "python3"; `httpx` needs `httpx[socks]`/`socksio` or a socks5h:// proxy ImportErrors at import time.
+- [Testing isolated TypeScript safety helpers](typescript-safety-helper-tests.md) — keep pure risk gates separate from Pino-backed supervisors so Node can test boundaries without app-runtime bundling.
+- [Recoverable order lifecycle](recoverable-order-lifecycle.md) — live submissions need durable identity, stop fences, and fail-closed journal parsing across every in-flight phase.

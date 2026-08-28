@@ -186,6 +186,14 @@ export type PolymarketLiveSnapshotSignal = {
   selectedDirection: PolymarketLiveSnapshotSignalSelectedDirection;
   confirmed: boolean;
   reason: string;
+  /** @nullable */
+  topThreeImbalanceRatio: number | null;
+  /** @minimum 0 */
+  aggressiveBuyVolumeBtc: number;
+  /** @minimum 0 */
+  aggressiveSellVolumeBtc: number;
+  /** @nullable */
+  wallObservedAt: string | null;
 };
 
 export type PolymarketLiveSnapshotWallet = {
@@ -225,7 +233,7 @@ export type PolymarketExecutionMode = typeof PolymarketExecutionMode[keyof typeo
 
 
 export const PolymarketExecutionMode = {
-  CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK: 'CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK',
+  BINANCE_DUAL_TRACK_FAK_GTC: 'BINANCE_DUAL_TRACK_FAK_GTC',
 } as const;
 
 export type PolymarketExecutionState = typeof PolymarketExecutionState[keyof typeof PolymarketExecutionState];
@@ -238,9 +246,13 @@ export const PolymarketExecutionState = {
   ARMED: 'ARMED',
   SUBMITTING: 'SUBMITTING',
   VERIFYING: 'VERIFYING',
-  WAITING_FOR_TAKE_PROFIT: 'WAITING_FOR_TAKE_PROFIT',
+  PLACING_DEFENSE: 'PLACING_DEFENSE',
+  WAITING_DUAL_TRACK: 'WAITING_DUAL_TRACK',
+  CANCELING_DEFENSE: 'CANCELING_DEFENSE',
+  TRACK_C_SUBMITTING: 'TRACK_C_SUBMITTING',
+  TRACK_C_WAITING_TAKE_PROFIT: 'TRACK_C_WAITING_TAKE_PROFIT',
   EXITING: 'EXITING',
-  EXIT_RETRYING: 'EXIT_RETRYING',
+  SETTLEMENT_WAIT: 'SETTLEMENT_WAIT',
   FILLED: 'FILLED',
   HALTED: 'HALTED',
 } as const;
@@ -254,6 +266,29 @@ export type PolymarketExecutionSide = typeof PolymarketExecutionSide[keyof typeo
 export const PolymarketExecutionSide = {
   UP: 'UP',
   DOWN: 'DOWN',
+} as const;
+
+/**
+ * @nullable
+ */
+export type PolymarketExecutionSecondSide = typeof PolymarketExecutionSecondSide[keyof typeof PolymarketExecutionSecondSide] | null;
+
+
+export const PolymarketExecutionSecondSide = {
+  UP: 'UP',
+  DOWN: 'DOWN',
+} as const;
+
+/**
+ * @nullable
+ */
+export type PolymarketExecutionBranch = typeof PolymarketExecutionBranch[keyof typeof PolymarketExecutionBranch] | null;
+
+
+export const PolymarketExecutionBranch = {
+  A: 'A',
+  B: 'B',
+  C: 'C',
 } as const;
 
 export interface PolymarketExecution {
@@ -271,6 +306,10 @@ export interface PolymarketExecution {
   /** @nullable */
   entryOrderId: string | null;
   /** @nullable */
+  defenseOrderId: string | null;
+  /** @nullable */
+  secondEntryOrderId: string | null;
+  /** @nullable */
   exitOrderId: string | null;
   unresolvedOrder: boolean;
   /** @nullable */
@@ -280,24 +319,29 @@ export interface PolymarketExecution {
   /** @nullable */
   entryPricePusd: number | null;
   /** @nullable */
+  defensePricePusd: number | null;
+  /** @nullable */
+  defenseShares: number | null;
+  /** @nullable */
+  defenseMatchedShares: number | null;
+  /** @nullable */
   takeProfitPricePusd: number | null;
   /** @nullable */
   remainingShares: number | null;
   /** @nullable */
-  exitSellFloorPusd: number | null;
-  exitTriggered: boolean;
+  secondSide: PolymarketExecutionSecondSide;
+  /** @nullable */
+  secondShares: number | null;
+  /** @nullable */
+  secondEntryPricePusd: number | null;
+  /** @nullable */
+  secondTargetPusd: number | null;
   /** @nullable */
   directionReason: string | null;
   /** @nullable */
-  entryCombinedAskPusd: number | null;
+  branch: PolymarketExecutionBranch;
   /** @nullable */
-  lastExitError: string | null;
-  /** @nullable */
-  lastAttemptAt: string | null;
-  /** @nullable */
-  lastAttemptCombinedAsk: number | null;
-  /** @nullable */
-  lastAttemptOutcome: string | null;
+  lastError: string | null;
 }
 
 export interface PolymarketLiveSnapshot {
@@ -314,50 +358,6 @@ export interface PolymarketLiveSnapshot {
   inventory: PolymarketLiveSnapshotInventory;
   compound: PolymarketLiveSnapshotCompound;
   execution: PolymarketExecution;
-}
-
-export type PolymarketOpportunityOutcome = typeof PolymarketOpportunityOutcome[keyof typeof PolymarketOpportunityOutcome];
-
-
-export const PolymarketOpportunityOutcome = {
-  OPEN: 'OPEN',
-  EXECUTED: 'EXECUTED',
-  NOT_EXECUTED: 'NOT_EXECUTED',
-} as const;
-
-export interface PolymarketOpportunity {
-  id: string;
-  /** @nullable */
-  conditionId: string | null;
-  openedAt: string;
-  /** @nullable */
-  closedAt: string | null;
-  thresholdPusd: number;
-  entryCombinedAskPusd: number;
-  minCombinedAskPusd: number;
-  /** @nullable */
-  yesBestAskAtOpen: number | null;
-  /** @nullable */
-  noBestAskAtOpen: number | null;
-  durationBelowThresholdMs: number;
-  outcome: PolymarketOpportunityOutcome;
-  /** @nullable */
-  reason: string | null;
-  /** @nullable */
-  rejectionInference: string | null;
-  /** @nullable */
-  shares: number | null;
-  /** @nullable */
-  costPusd: number | null;
-  /** @nullable */
-  yesOrderId: string | null;
-  /** @nullable */
-  noOrderId: string | null;
-}
-
-export interface PolymarketOpportunityLog {
-  thresholdPusd: number;
-  entries: PolymarketOpportunity[];
 }
 
 export type PolymarketMarketRaw = { [key: string]: unknown };

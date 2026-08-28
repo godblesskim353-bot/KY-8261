@@ -1,0 +1,26 @@
+[Unit]
+Description=Polymarket BTC dual-track execution API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/etc/polymarket-bot/polymarket-bot.env
+Environment=NODE_ENV=production
+Environment=PATH=/opt/polymarket-bot/node_modules/.bin:/opt/polymarket-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pnpm --filter @workspace/api-server run start
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/polymarket-bot
+
+[Install]
+WantedBy=multi-user.target

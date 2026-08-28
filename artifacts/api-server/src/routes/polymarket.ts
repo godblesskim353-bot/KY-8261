@@ -81,8 +81,8 @@ router.get("/polymarket/status", async (_req, res) => {
     executionAvailable,
     message: proxyReachable && executionAvailable
       ? liveTradingEnabled
-        ? "Directional single-leg FAK entry accepts selected asks from 0.40 to 0.82 pUSD and submits up to ask + 0.02 pUSD, capped at 0.82; price-triggered FAK exits sell at entry price + 0.05 pUSD."
-        : "Directional single-leg execution is installed but disabled by LIVE_TRADING_ENABLED."
+        ? "Binance perpetual top-three 4x depth plus >10 BTC aggressive flow in 50 ms drives a 10% FAK entry at ask + 0.01 (0.40–0.82 cap), immediately protected by an opposite GTC defense and dual-track reconciliation."
+        : "Binance-driven dual-track CLOB execution is installed but disabled by LIVE_TRADING_ENABLED."
       : "The proxy guard is closed. Live requests are blocked and the dashboard remains in mock mode.",
   });
 
@@ -91,10 +91,6 @@ router.get("/polymarket/status", async (_req, res) => {
 
 router.get("/polymarket/live", (_req, res) => {
   res.json(liveMarketData.snapshot());
-});
-
-router.get("/polymarket/opportunities", (_req, res) => {
-  res.json(liveMarketData.opportunities());
 });
 
 router.post("/polymarket/execution/stop", async (_req, res) => {

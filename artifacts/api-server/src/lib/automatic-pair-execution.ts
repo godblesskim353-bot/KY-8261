@@ -1,832 +1,338 @@
 import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import {
-  ENTRY_PRICE_AGGRESSION_PUSD,
-  MAX_ENTRY_PRICE_PUSD,
-  MIN_ENTRY_PRICE_PUSD,
-  calculateEntryLimitPrice,
-  isEntryPriceWithinBand,
-} from "./entry-price-band";
+import { calculateDefensePrice, calculateDynamicHedgeBudget, calculateValidBuyShares } from "./binance-signal";
+import { isEntryPriceWithinBand, MAX_ENTRY_PRICE_PUSD } from "./entry-price-band";
 import { logger } from "./logger";
 
 const execFileAsync = promisify(execFile);
 const API_SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXECUTION_HELPER = path.resolve(API_SERVER_DIR, "scripts/manage_clob_pair.py");
-const EXECUTION_JOURNAL_PATH = process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_PATH?.trim()
+const JOURNAL = process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_PATH?.trim()
   ? path.resolve(process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_PATH.trim())
   : path.resolve(API_SERVER_DIR, ".automatic-single-execution-journal.json");
-
-export const MAX_COMBINED_ASK = 1;
 export const WALLET_STAKE_FRACTION = 0.1;
-/**
- * Absolute price offset, not a wallet-level profit target.
- * Example: entry at 0.65 pUSD sets the sell trigger at 0.70 pUSD.
- */
 export const EXIT_TRIGGER_PRICE_OFFSET_PUSD = 0.05;
-const RECONCILE_INTERVAL_MS = 500;
-const RETRY_COOLDOWN_MS = 15_000;
-const EXIT_RETRY_MS = 750;
-const ORDER_POLL_ATTEMPTS = 4;
-const ORDER_POLL_MS = 250;
-
 export type Direction = "UP" | "DOWN";
+type Phase = "ENTRY" | "DEFENSE" | "TRACK_A" | "TRACK_C_ENTRY" | "TRACK_C_EXIT" | "SETTLEMENT_WAIT" | "COMPLETE";
 
 export type AutomaticPairExecutionStatus = {
-  mode: "CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK";
-  enabled: boolean;
-  armed: boolean;
-  state:
-    | "DISABLED"
-    | "PAUSED"
-    | "WAITING_FOR_MARKET"
-    | "ARMED"
-    | "SUBMITTING"
-    | "VERIFYING"
-    | "WAITING_FOR_TAKE_PROFIT"
-    | "EXITING"
-    | "EXIT_RETRYING"
-    | "FILLED"
-    | "HALTED";
-  reason: string;
-  lastActionAt: string | null;
-  conditionId: string | null;
-  side: Direction | null;
-  entryOrderId: string | null;
-  exitOrderId: string | null;
-  unresolvedOrder: boolean;
-  plannedShares: number | null;
-  plannedCostPusd: number | null;
-  entryPricePusd: number | null;
-  takeProfitPricePusd: number | null;
-  remainingShares: number | null;
-  exitSellFloorPusd: number | null;
-  exitTriggered: boolean;
-  directionReason: string | null;
-  entryCombinedAskPusd: number | null;
-  lastExitError: string | null;
-  lastAttemptAt: string | null;
-  lastAttemptCombinedAsk: number | null;
-  lastAttemptOutcome: string | null;
+  mode: "BINANCE_DUAL_TRACK_FAK_GTC";
+  enabled: boolean; armed: boolean;
+  state: "DISABLED" | "PAUSED" | "WAITING_FOR_MARKET" | "ARMED" | "SUBMITTING" | "VERIFYING" | "PLACING_DEFENSE" | "WAITING_DUAL_TRACK" | "CANCELING_DEFENSE" | "TRACK_C_SUBMITTING" | "TRACK_C_WAITING_TAKE_PROFIT" | "EXITING" | "SETTLEMENT_WAIT" | "FILLED" | "HALTED";
+  reason: string; lastActionAt: string | null; conditionId: string | null; side: Direction | null;
+  entryOrderId: string | null; defenseOrderId: string | null; secondEntryOrderId: string | null; exitOrderId: string | null;
+  unresolvedOrder: boolean; plannedShares: number | null; plannedCostPusd: number | null; entryPricePusd: number | null;
+  defensePricePusd: number | null; defenseShares: number | null; defenseMatchedShares: number | null; takeProfitPricePusd: number | null; remainingShares: number | null;
+  secondSide: Direction | null; secondShares: number | null; secondEntryPricePusd: number | null; secondTargetPusd: number | null;
+  directionReason: string | null; branch: "A" | "B" | "C" | null; lastError: string | null;
 };
 
 export type PairExecutionCandidate = {
   ready: boolean;
-  market: {
-    conditionId: string | null;
-    yesTokenId: string | null;
-    noTokenId: string | null;
-    endAt: number | null;
-    negRisk: boolean;
-  };
-  quotes: {
-    yesBestAsk: number | null;
-    yesAskSize: number | null;
-    noBestAsk: number | null;
-    noAskSize: number | null;
-    yesBestBid: number | null;
-    yesBidSize: number | null;
-    noBestBid: number | null;
-    noBidSize: number | null;
-    yesBidDepth: number | null;
-    yesAskDepth: number | null;
-    noBidDepth: number | null;
-    noAskDepth: number | null;
-    combinedAsk: number | null;
-    fresh: boolean;
-  };
-  signal: {
-    btcDirection: Direction | null;
-    bookDirection: Direction | null;
-    selectedDirection: Direction | null;
-    confirmed: boolean;
-    reason: string;
-  };
-  walletBalancePusd: number | null;
-  inventory: { yesShares: number | null; noShares: number | null };
+  market: { conditionId: string | null; yesTokenId: string | null; noTokenId: string | null; endAt: number | null; negRisk: boolean };
+  quotes: { yesBestAsk: number | null; yesAskSize?: number | null; noBestAsk: number | null; noAskSize?: number | null; yesBestBid: number | null; yesBidSize?: number | null; noBestBid: number | null; noBidSize?: number | null; yesBidDepth?: number | null; yesAskDepth?: number | null; noBidDepth?: number | null; noAskDepth?: number | null; combinedAsk?: number | null; fresh: boolean };
+  signal: { btcDirection: Direction | null; bookDirection: Direction | null; selectedDirection: Direction | null; confirmed: boolean; reason: string };
+  walletBalancePusd: number | null; walletFresh?: boolean; inventory: { yesShares: number | null; noShares: number | null; fresh?: boolean };
 };
+type Order = { orderId?: string; status?: string; sizeMatched?: number | string | null; executedPrice?: number | string | null; price?: number | string | null };
+type Result = { ok?: boolean; code?: string; detail?: string; orders?: Order[] };
+type Journal = { phase: Phase; conditionId: string; side: Direction; tokenId: string; oppositeTokenId: string; entryOrderId: string | null; defenseOrderId: string | null; secondEntryOrderId: string | null; exitOrderId: string | null; submissionId?: string | null; stopRequested?: boolean; entryPricePusd: number; shares: number; defensePricePusd: number | null; defenseMatchedShares?: number | null; secondSide: Direction | null; secondShares: number | null; secondEntryPricePusd: number | null; secondTargetPusd: number | null; branch: "A" | "B" | "C" | null; createdAt: string; updatedAt: string };
 
-type HelperOrder = { leg?: string; accepted?: boolean; orderId?: string | null };
-type HelperResult = {
-  ok?: boolean;
-  code?: string;
-  detail?: string;
-  orders?: HelperOrder[];
-  noOrdersAccepted?: boolean;
-};
-type OrderStatus = {
-  orderId?: string;
-  status?: string;
-  sizeMatched?: number | string | null;
-  originalSize?: number | string | null;
-  price?: number | string | null;
-  side?: string | null;
-  tokenId?: string | null;
-};
-type OrderStatusResult = { ok?: boolean; code?: string; detail?: string; orders?: OrderStatus[] };
-
-type ExecutionJournal = {
-  phase: "ENTRY" | "POSITION" | "EXITING";
-  conditionId: string;
-  side: Direction;
-  tokenId: string;
-  entryOrderId: string | null;
-  exitOrderId: string | null;
-  entryPricePusd: number;
-  plannedShares: number;
-  remainingShares: number;
-  takeProfitPricePusd: number;
-  exitSellFloorPusd: number | null;
-  exitTriggered: boolean;
-  createdAt: string;
-  updatedAt: string;
-};
-
-function finiteNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function asIso(value: number): string {
-  return new Date(value).toISOString();
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function isFilled(status: string): boolean {
-  return ["MATCHED", "FILLED"].includes(status.toUpperCase());
-}
-
-function isTerminal(status: string): boolean {
-  return ["CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED", "FAILED", "REJECTED"].includes(
-    status.toUpperCase(),
-  );
-}
-
-function roundToCents(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
-function greatestCommonDivisor(left: number, right: number): number {
-  let a = Math.abs(Math.trunc(left));
-  let b = Math.abs(Math.trunc(right));
-  while (b) [a, b] = [b, a % b];
-  return a || 1;
-}
-
-function roundSharesUpForValidAmounts(
-  targetBudgetPusd: number,
-  availableWalletPusd: number,
-  pricePusd: number,
-): number | null {
-  if (
-    !Number.isFinite(targetBudgetPusd) ||
-    !Number.isFinite(availableWalletPusd) ||
-    !Number.isFinite(pricePusd) ||
-    targetBudgetPusd <= 0 ||
-    availableWalletPusd <= 0 ||
-    pricePusd <= 0
-  ) {
-    return null;
-  }
-  const priceCents = Math.round(pricePusd * 100);
-  if (priceCents <= 0) return null;
-  // For a cent-tick price, this is the smallest four-decimal share step whose
-  // price × size produces a cent-precision maker amount. This directly avoids
-  // the invalid-amount rejection seen with arbitrary fractional sizes.
-  const validShareStep = (10_000 / greatestCommonDivisor(priceCents, 10_000)) / 10_000;
-  const rawShares = targetBudgetPusd / pricePusd;
-  const roundedUp = Math.ceil((rawShares - Number.EPSILON) / validShareStep) * validShareStep;
-  if (roundedUp * pricePusd > availableWalletPusd + 1e-9) return null;
-  return Number(roundedUp.toFixed(4));
-}
-
-function loadExecutionJournal(): ExecutionJournal | null {
-  if (!existsSync(EXECUTION_JOURNAL_PATH)) return null;
+const n = (v: unknown): number | null => typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() && Number.isFinite(Number(v)) ? Number(v) : null;
+const iso = (v: number) => new Date(v).toISOString();
+const terminal = (s: string) => ["CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED", "FAILED", "REJECTED"].includes(s.toUpperCase());
+const filled = (s: string) => ["MATCHED", "FILLED"].includes(s.toUpperCase());
+const opposite = (side: Direction): Direction => side === "UP" ? "DOWN" : "UP";
+const cents = (v: number) => Number(v.toFixed(2));
+/** Largest valid four-decimal CLOB BUY size whose cent maker amount is within both caps. */
+export const sharesFor = calculateValidBuyShares;
+type JournalLoad = { kind: "ABSENT" } | { kind: "VALID"; journal: Journal } | { kind: "INVALID"; reason: string };
+function load(journalPath = JOURNAL): JournalLoad {
+  if (!existsSync(journalPath)) return { kind: "ABSENT" };
   try {
-    const parsed = JSON.parse(readFileSync(EXECUTION_JOURNAL_PATH, "utf8")) as Partial<ExecutionJournal>;
-    if (
-      !["ENTRY", "POSITION", "EXITING"].includes(String(parsed.phase)) ||
-      typeof parsed.conditionId !== "string" ||
-      (parsed.side !== "UP" && parsed.side !== "DOWN") ||
-      typeof parsed.tokenId !== "string" ||
-      typeof parsed.entryPricePusd !== "number" ||
-      typeof parsed.plannedShares !== "number" ||
-      typeof parsed.remainingShares !== "number" ||
-      typeof parsed.takeProfitPricePusd !== "number" ||
-      typeof parsed.createdAt !== "string" ||
-      typeof parsed.updatedAt !== "string"
-    ) {
-      throw new Error("Invalid single-leg execution journal");
-    }
-    return {
-      phase: parsed.phase as ExecutionJournal["phase"],
-      conditionId: parsed.conditionId,
-      side: parsed.side as Direction,
-      tokenId: parsed.tokenId,
-      entryOrderId: typeof parsed.entryOrderId === "string" ? parsed.entryOrderId : null,
-      exitOrderId: typeof parsed.exitOrderId === "string" ? parsed.exitOrderId : null,
-      entryPricePusd: parsed.entryPricePusd,
-      plannedShares: parsed.plannedShares,
-      remainingShares: parsed.remainingShares,
-      takeProfitPricePusd: parsed.takeProfitPricePusd,
-      exitSellFloorPusd: typeof parsed.exitSellFloorPusd === "number" ? parsed.exitSellFloorPusd : null,
-      exitTriggered: parsed.exitTriggered === true,
-      createdAt: parsed.createdAt,
-      updatedAt: parsed.updatedAt,
-    };
-  } catch {
-    return null;
-  }
+    const j = JSON.parse(readFileSync(journalPath, "utf8")) as Journal;
+    return ["ENTRY", "DEFENSE", "TRACK_A", "TRACK_C_ENTRY", "TRACK_C_EXIT", "SETTLEMENT_WAIT", "COMPLETE"].includes(j.phase) && Boolean(j.conditionId && j.tokenId && j.oppositeTokenId) && (j.side === "UP" || j.side === "DOWN")
+      ? { kind: "VALID", journal: j }
+      : { kind: "INVALID", reason: "Journal schema validation failed." };
+  } catch (error) { return { kind: "INVALID", reason: error instanceof Error ? error.message : "Journal is unreadable." }; }
 }
-
-function persistExecutionJournal(journal: ExecutionJournal): void {
-  const temporaryPath = `${EXECUTION_JOURNAL_PATH}.${process.pid}.tmp`;
-  writeFileSync(temporaryPath, JSON.stringify(journal), { encoding: "utf8", mode: 0o600 });
-  renameSync(temporaryPath, EXECUTION_JOURNAL_PATH);
+function save(j: Journal, journalPath = JOURNAL) { const tmp = `${journalPath}.${process.pid}.tmp`; writeFileSync(tmp, JSON.stringify(j), { mode: 0o600 }); renameSync(tmp, journalPath); }
+function clear(journalPath = JOURNAL) { if (existsSync(journalPath)) unlinkSync(journalPath); }
+function python(): string | null {
+  const configured = process.env.POLYMARKET_EXECUTION_PYTHON?.trim(); if (configured) return configured;
+  return [path.resolve(process.cwd(), ".pythonlibs/bin/python"), path.resolve(API_SERVER_DIR, "../../.pythonlibs/bin/python"), path.resolve(process.cwd(), ".venv/bin/python3")].find(existsSync) ?? null;
 }
-
-function clearExecutionJournal(): void {
-  if (existsSync(EXECUTION_JOURNAL_PATH)) unlinkSync(EXECUTION_JOURNAL_PATH);
-}
-
-function executionPython(): string | null {
-  const configured = process.env.POLYMARKET_EXECUTION_PYTHON?.trim();
-  if (configured) return configured;
-  const candidates = [
-    path.resolve(process.cwd(), ".pythonlibs/bin/python"),
-    path.resolve(API_SERVER_DIR, "../../.pythonlibs/bin/python"),
-    path.resolve(process.cwd(), ".venv/bin/python3"),
-    path.resolve(process.cwd(), ".venv/bin/python"),
-    path.resolve(API_SERVER_DIR, "../../.venv/bin/python3"),
-    path.resolve(API_SERVER_DIR, "../../.venv/bin/python"),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-export function isCLOBSingleLegBridgeAvailable(): boolean {
-  return Boolean(
-    executionPython() &&
-      existsSync(EXECUTION_HELPER) &&
-      process.env.POLYMARKET_PRIVATE_KEY?.trim() &&
-      process.env.POLYMARKET_FUNDER?.trim() &&
-      process.env.RESIDENTIAL_PROXY_URL?.trim(),
-  );
-}
-
-// Kept as a compatibility export for the existing status route.
+export function isCLOBSingleLegBridgeAvailable(): boolean { return Boolean(python() && existsSync(EXECUTION_HELPER) && process.env.POLYMARKET_PRIVATE_KEY?.trim() && process.env.POLYMARKET_FUNDER?.trim() && process.env.RESIDENTIAL_PROXY_URL?.trim()); }
 export const isCLOBTwoLegBridgeAvailable = isCLOBSingleLegBridgeAvailable;
+export type SupervisorHelper = (action: "submit_fak_buy" | "submit_fak_sell" | "submit_gtc_buy" | "cancel_orders" | "get_orders" | "recover_order", payload: Record<string, unknown>) => Promise<Result>;
+export type SupervisorOptions = { journalPath?: string; helper?: SupervisorHelper; bridgeAvailable?: boolean };
 
 export class AutomaticPairExecutionSupervisor {
-  private status: AutomaticPairExecutionStatus = {
-    mode: "CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK",
-    enabled: false,
-    armed: false,
-    state: "DISABLED",
-    reason: "LIVE_TRADING_ENABLED is not set.",
-    lastActionAt: null,
-    conditionId: null,
-    side: null,
-    entryOrderId: null,
-    exitOrderId: null,
-    unresolvedOrder: false,
-    plannedShares: null,
-    plannedCostPusd: null,
-    entryPricePusd: null,
-    takeProfitPricePusd: null,
-    remainingShares: null,
-    exitSellFloorPusd: null,
-    exitTriggered: false,
-    directionReason: null,
-    entryCombinedAskPusd: null,
-    lastExitError: null,
-    lastAttemptAt: null,
-    lastAttemptCombinedAsk: null,
-    lastAttemptOutcome: null,
-  };
-  private submitting = false;
-  private reconciling = false;
-  private lastReconcileAt = 0;
-  private retryAfterAt = 0;
-  private completedConditionId: string | null = null;
-  private tokenId: string | null = null;
-  private entryLimitPrice: number | null = null;
-  private positionConfirmed = false;
-
-  constructor() {
-    const journal = loadExecutionJournal();
-    if (journal) {
-      this.status.state = "PAUSED";
-      this.status.reason = "An open single-leg execution journal requires START to resume exit supervision.";
-      this.status.armed = false;
-      this.status.conditionId = journal.conditionId;
-      this.status.side = journal.side;
-      this.status.entryOrderId = journal.entryOrderId;
-      this.status.exitOrderId = journal.exitOrderId;
-      this.status.plannedShares = journal.plannedShares;
-      this.status.plannedCostPusd = roundToCents(journal.entryPricePusd * journal.plannedShares);
-      this.status.entryPricePusd = journal.entryPricePusd;
-      this.status.takeProfitPricePusd = journal.takeProfitPricePusd;
-      this.status.remainingShares = journal.remainingShares;
-      this.status.exitSellFloorPusd = journal.exitSellFloorPusd;
-      this.status.exitTriggered = journal.exitTriggered;
-      this.tokenId = journal.tokenId;
-      this.entryLimitPrice = journal.entryPricePusd;
-      this.positionConfirmed = journal.phase === "POSITION" || journal.phase === "EXITING";
-      this.status.unresolvedOrder = journal.phase === "ENTRY";
-      this.status.lastActionAt = journal.updatedAt;
+  private status: AutomaticPairExecutionStatus = { mode: "BINANCE_DUAL_TRACK_FAK_GTC", enabled: false, armed: false, state: "DISABLED", reason: "LIVE_TRADING_ENABLED is not set.", lastActionAt: null, conditionId: null, side: null, entryOrderId: null, defenseOrderId: null, secondEntryOrderId: null, exitOrderId: null, unresolvedOrder: false, plannedShares: null, plannedCostPusd: null, entryPricePusd: null, defensePricePusd: null, defenseShares: null, defenseMatchedShares: null, takeProfitPricePusd: null, remainingShares: null, secondSide: null, secondShares: null, secondEntryPricePusd: null, secondTargetPusd: null, directionReason: null, branch: null, lastError: null };
+  private tokenId: string | null = null; private oppositeTokenId: string | null = null; private phase: Phase | null = null;
+  private completed: string | null = null; private busy = false; private lastPoll = 0;
+  private stopRequested = false; private submissionId: string | null = null;
+  private invalidJournal = false;
+  private readonly journalPath: string; private readonly helperOverride?: SupervisorHelper; private readonly bridgeAvailableOverride?: boolean;
+  constructor(options: SupervisorOptions = {}) {
+    this.journalPath = options.journalPath ?? JOURNAL; this.helperOverride = options.helper; this.bridgeAvailableOverride = options.bridgeAvailable;
+    const loaded = load(this.journalPath);
+    if (loaded.kind === "ABSENT") return;
+    if (loaded.kind === "INVALID") {
+      this.invalidJournal = true;
+      this.set("PAUSED", `Execution journal is invalid or unreadable (${loaded.reason}); ARM is blocked pending explicit operator/account reconciliation.`);
+      return;
     }
+    const j = loaded.journal;
+    if (j.phase === "COMPLETE") { this.completed = j.conditionId; this.set("PAUSED", "Recovered terminal condition marker; manual ARM is required for a new condition."); return; }
+    this.phase = j.phase; this.tokenId = j.tokenId; this.oppositeTokenId = j.oppositeTokenId; this.stopRequested = j.stopRequested === true; this.submissionId = j.submissionId ?? null;
+    Object.assign(this.status, { state: "PAUSED", reason: "Recovered journal requires manual ARM; all order outcomes will be reconciled first.", armed: false, conditionId: j.conditionId, side: j.side, entryOrderId: j.entryOrderId, defenseOrderId: j.defenseOrderId, secondEntryOrderId: j.secondEntryOrderId, exitOrderId: j.exitOrderId, entryPricePusd: j.entryPricePusd, plannedShares: j.shares, plannedCostPusd: cents(j.entryPricePusd * j.shares), remainingShares: j.shares, defensePricePusd: j.defensePricePusd, defenseShares: j.shares, defenseMatchedShares: j.defenseMatchedShares ?? null, secondSide: j.secondSide, secondShares: j.secondShares, secondEntryPricePusd: j.secondEntryPricePusd, secondTargetPusd: j.secondTargetPusd, branch: j.branch });
   }
-
-  snapshot(): AutomaticPairExecutionStatus {
-    return { ...this.status };
-  }
-
-  async evaluate(candidate: PairExecutionCandidate): Promise<void> {
-    const enabled = process.env.LIVE_TRADING_ENABLED === "true";
-    this.status.enabled = enabled;
-    if (this.status.state === "HALTED") return;
-    if (!enabled) {
-      this.status.armed = false;
-      this.setState("DISABLED", "LIVE_TRADING_ENABLED is not set.");
-      return;
-    }
-
-    // An active position is always supervised to zero once this supervisor
-    // owns it. Entry remains blocked while any exit is unresolved.
-    if (this.hasPosition()) {
-      await this.managePosition(candidate);
-      return;
-    }
-    if (this.status.entryOrderId) {
-      await this.reconcileEntry(candidate);
-      return;
-    }
-    if (this.status.unresolvedOrder) {
-      this.setState("VERIFYING", "An entry submission has an unknown result; duplicate entries are blocked.");
-      return;
-    }
-    if (!this.status.armed) {
-      this.setState("PAUSED", "Press START AUTO EXECUTION to begin directional execution.");
-      return;
-    }
-    if (this.retryAfterAt > Date.now()) {
-      this.setState("WAITING_FOR_MARKET", "Entry cooldown is active; automatic retry will continue.");
-      return;
-    }
-    if (
-      candidate.market.conditionId &&
-      candidate.market.conditionId !== this.completedConditionId &&
-      this.status.state === "FILLED"
-    ) {
-      this.clearExecution();
-      this.setState("ARMED", "New BTC market window observed.");
-    }
-    if (candidate.market.conditionId && candidate.market.conditionId === this.completedConditionId) {
-      this.setState("FILLED", "This BTC market window already completed one directional trade.");
-      return;
-    }
-    const blockReason = this.blockReason(candidate);
-    if (blockReason !== "READY") {
-      this.setState("WAITING_FOR_MARKET", blockReason);
-      return;
-    }
-    if (this.submitting) return;
-    const side = candidate.signal.selectedDirection;
-    const ask = side === "UP" ? candidate.quotes.yesBestAsk : candidate.quotes.noBestAsk;
-    if (!side || ask === null) return;
-    const entryLimitPrice = calculateEntryLimitPrice(ask);
-    if (entryLimitPrice === null) return;
-    const shares = this.calculateShares(candidate, entryLimitPrice);
-    if (shares === null) {
-      this.setState("WAITING_FOR_MARKET", "The verified wallet balance cannot fund a valid 10% single-leg order.");
-      return;
-    }
-    await this.submitEntry(candidate, side, ask, entryLimitPrice, shares);
-  }
-
-  async emergencyStop(): Promise<AutomaticPairExecutionStatus> {
+  snapshot() { return { ...this.status }; }
+  async arm() { if (this.status.state === "HALTED" || this.invalidJournal) { if (this.invalidJournal) this.set("PAUSED", "ARM blocked: invalid execution journal requires explicit operator/account reconciliation."); return this.snapshot(); } if (process.env.LIVE_TRADING_ENABLED !== "true" || !this.bridgeAvailable()) { this.set("PAUSED", "Live execution bridge, credentials, or master switch is unavailable."); return this.snapshot(); } this.status.armed = true; this.set(this.phase ? "VERIFYING" : "ARMED", this.phase ? "Manual arm accepted; reconciling recovered dual-track journal." : "Manual arm accepted; waiting for Binance-confirmed entry."); return this.snapshot(); }
+  async pause() { this.status.armed = false; this.set("PAUSED", "Operator paused entries; active journal is retained and no destructive action is inferred."); return this.snapshot(); }
+  async emergencyStop() {
     this.status.armed = false;
-    this.setState("HALTED", "Operator kill switch is active. No new orders or exit retries will be submitted.");
-    return this.snapshot();
-  }
-
-  async arm(): Promise<AutomaticPairExecutionStatus> {
-    if (this.status.state === "HALTED") return this.snapshot();
-    if (this.status.unresolvedOrder && !this.status.entryOrderId) return this.snapshot();
-    if (process.env.LIVE_TRADING_ENABLED !== "true") {
-      this.status.armed = false;
-      this.setState("DISABLED", "Server master execution switch is not enabled.");
-      return this.snapshot();
-    }
-    if (!isCLOBSingleLegBridgeAvailable()) {
-      this.status.armed = false;
-      this.setState("PAUSED", "Single-leg CLOB execution bridge or credentials are unavailable.");
-      return this.snapshot();
-    }
-    this.status.armed = true;
-    this.setState(
-      this.hasPosition()
-        ? "EXIT_RETRYING"
-        : "ARMED",
-      this.hasPosition()
-        ? "Operator resumed supervision of the active position; new entries remain blocked until it is cleared."
-        : "Operator armed directional single-leg execution.",
-    );
-    return this.snapshot();
-  }
-
-  async pause(): Promise<AutomaticPairExecutionStatus> {
-    this.status.armed = false;
-    if (this.hasPosition()) {
-      this.setState("EXIT_RETRYING", "New entries are paused; the active position remains under exit supervision.");
-    } else if (this.status.entryOrderId) {
-      this.setState("VERIFYING", "New entries are paused while the entry order lifecycle is confirmed.");
-    } else {
-      this.setState("PAUSED", "Operator paused automatic execution.");
-    }
-    return this.snapshot();
-  }
-
-  private blockReason(candidate: PairExecutionCandidate): string {
-    if (!isCLOBSingleLegBridgeAvailable()) return "Single-leg CLOB execution bridge or credentials are unavailable.";
-    if (!candidate.ready || !candidate.quotes.fresh) return "Fresh Binance, CLOB bid/ask, and orderbook-direction data are required.";
-    if (!candidate.market.conditionId || !candidate.market.yesTokenId || !candidate.market.noTokenId || candidate.market.endAt === null) {
-      return "A verified active BTC 5-minute market is required.";
-    }
-    const { yesBestAsk, noBestAsk, combinedAsk } = candidate.quotes;
-    if (yesBestAsk === null || noBestAsk === null || combinedAsk === null || yesBestAsk <= 0 || noBestAsk <= 0) {
-      return "Both Up and Down asks are required for the <100¢ mispricing gate.";
-    }
-    if (combinedAsk >= MAX_COMBINED_ASK) {
-      return "Entry waits for Up ask + Down ask to be strictly below 100¢.";
-    }
-    if (!candidate.signal.confirmed || !candidate.signal.selectedDirection) {
-      return candidate.signal.reason;
-    }
-    const selectedAsk = candidate.signal.selectedDirection === "UP" ? yesBestAsk : noBestAsk;
-    if (!isEntryPriceWithinBand(selectedAsk)) {
-      return `Selected ${candidate.signal.selectedDirection} ask must be between ${MIN_ENTRY_PRICE_PUSD.toFixed(2)} and ${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD.`;
-    }
-    if (selectedAsk + EXIT_TRIGGER_PRICE_OFFSET_PUSD >= 1) {
-      return "Selected token's entry + 0.05 pUSD price trigger would be at or above 1.00 pUSD.";
-    }
-    if (
-      candidate.inventory.yesShares === null ||
-      candidate.inventory.noShares === null
-    ) {
-      return "Verified current inventory is required before a new entry.";
-    }
-    if (candidate.inventory.yesShares > 0.01 || candidate.inventory.noShares > 0.01) {
-      return "Existing Up/Down inventory must be cleared before a new entry.";
-    }
-    if (candidate.walletBalancePusd === null || !Number.isFinite(candidate.walletBalancePusd) || candidate.walletBalancePusd <= 0) {
-      return "A verified positive CLOB collateral balance is required.";
-    }
-    return "READY";
-  }
-
-  private calculateShares(candidate: PairExecutionCandidate, ask: number): number | null {
-    if (candidate.walletBalancePusd === null) return null;
-    return roundSharesUpForValidAmounts(
-      candidate.walletBalancePusd * WALLET_STAKE_FRACTION,
-      candidate.walletBalancePusd,
-      ask,
-    );
-  }
-
-  private async submitEntry(
-    candidate: PairExecutionCandidate,
-    side: Direction,
-    observedAsk: number,
-    entryLimitPrice: number,
-    shares: number,
-  ): Promise<void> {
-    const tokenId = side === "UP" ? candidate.market.yesTokenId : candidate.market.noTokenId;
-    if (!tokenId || !candidate.market.conditionId) return;
-    if (!isEntryPriceWithinBand(observedAsk) || !isEntryPriceWithinBand(entryLimitPrice)) {
-      this.setState(
-        "WAITING_FOR_MARKET",
-        `Selected ${side} ask and BUY limit must stay between ${MIN_ENTRY_PRICE_PUSD.toFixed(2)} and ${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD; no entry was submitted.`,
-      );
-      return;
-    }
-    this.submitting = true;
-    this.status.conditionId = candidate.market.conditionId;
-    this.status.side = side;
-    this.status.plannedShares = shares;
-    this.status.plannedCostPusd = roundToCents(shares * entryLimitPrice);
-    this.status.entryPricePusd = entryLimitPrice;
-    this.status.takeProfitPricePusd = roundToCents(entryLimitPrice + EXIT_TRIGGER_PRICE_OFFSET_PUSD);
-    this.status.remainingShares = shares;
-    this.status.directionReason = candidate.signal.reason;
-    this.status.entryCombinedAskPusd = candidate.quotes.combinedAsk;
-    this.status.lastAttemptAt = new Date().toISOString();
-    this.status.lastAttemptCombinedAsk = candidate.quotes.combinedAsk;
-    this.status.lastAttemptOutcome = null;
-    this.status.lastExitError = null;
-    this.status.unresolvedOrder = false;
-    this.status.exitTriggered = false;
-    this.status.exitSellFloorPusd = null;
-    this.tokenId = tokenId;
-    this.entryLimitPrice = entryLimitPrice;
-    this.setState(
-      "SUBMITTING",
-      `Submitting one ${side} market-style FAK buy at ${entryLimitPrice.toFixed(2)} pUSD (observed ask ${observedAsk.toFixed(2)} + ${ENTRY_PRICE_AGGRESSION_PUSD.toFixed(2)}, capped at ${MAX_ENTRY_PRICE_PUSD.toFixed(2)}) with <100¢ mispricing gate.`,
-    );
+    this.stopRequested = true; this.persist();
+    if (this.busy) { this.set("PAUSED", "Durable stop fence is set; in-flight work may only reconcile and cannot submit another order."); return this.snapshot(); }
+    this.busy = true;
     try {
-      this.recordExecutionJournal("ENTRY");
-      const response = await this.callHelper("submit_fak_buy", {
-        tokenId,
-        leg: side,
-        price: entryLimitPrice,
-        size: shares,
-      });
-      const orderId = response.orders?.[0]?.orderId ?? null;
-      this.status.entryOrderId = orderId;
-      if (response.ok !== true || !orderId) {
-        const detail = response.code ? ` (${[response.code, response.detail].filter(Boolean).join(": ")})` : "";
-        this.status.lastAttemptOutcome = `REJECTED${detail || " (no code returned)"}`;
-        clearExecutionJournal();
-        this.clearExecution();
-        this.scheduleCooldown(`The ${side} FAK entry was rejected before a confirmed fill.${detail}`);
-        return;
-      }
-      this.status.lastAttemptOutcome = "ACCEPTED";
-      this.status.unresolvedOrder = true;
-      this.recordExecutionJournal("ENTRY");
-      this.setState("VERIFYING", `${side} FAK buy accepted; confirming the single-leg fill.`);
-      await this.reconcileEntry(candidate);
-    } catch (error) {
-      const detail = error instanceof Error && error.message ? ` (${error.message.slice(0, 180)})` : "";
-      this.status.lastAttemptOutcome = `EXCEPTION${detail}`;
-      this.status.unresolvedOrder = true;
-      this.setState("VERIFYING", `Entry lifecycle could not be confirmed; new entries remain blocked${detail}.`);
-    } finally {
-      this.submitting = false;
-    }
+      await this.finalizeStop();
+      return this.snapshot();
+    } catch (e) { this.unknown("Emergency stop encountered an unknown defense cancellation outcome."); return this.snapshot(); }
+    finally { this.busy = false; }
   }
-
-  private async reconcileEntry(candidate: PairExecutionCandidate): Promise<void> {
-    if (!this.status.entryOrderId || this.reconciling) return;
-    if (Date.now() - this.lastReconcileAt < RECONCILE_INTERVAL_MS) return;
-    this.reconciling = true;
-    this.lastReconcileAt = Date.now();
+  async evaluate(c: PairExecutionCandidate): Promise<void> {
+    this.status.enabled = process.env.LIVE_TRADING_ENABLED === "true";
+    if (!this.status.enabled) return void this.set("DISABLED", "LIVE_TRADING_ENABLED is not set.");
+    if (this.status.state === "HALTED" || this.busy) return;
+    this.busy = true;
     try {
-      const response = await this.callHelper("get_orders", { orderIds: [this.status.entryOrderId] });
-      const order = response.ok === true && response.orders?.length === 1 ? response.orders[0] : null;
-      if (!order) {
-        this.status.unresolvedOrder = true;
-        this.setState("VERIFYING", "Entry order status is unavailable; no new entry will be submitted.");
-        return;
+      if (this.stopRequested) { await this.finalizeStop(); return; }
+      if (this.phase) await this.manage(c);
+      else await this.enter(c);
+    } catch (e) { this.status.unresolvedOrder = true; this.status.lastError = e instanceof Error ? e.message.slice(0, 180) : "Unknown execution error"; this.set("PAUSED", "Order lifecycle is unknown; fail-closed until manual reconciliation."); }
+    finally { this.busy = false; }
+  }
+  private async enter(c: PairExecutionCandidate) {
+    if (this.stopRequested) return;
+    if (!this.status.armed) return void this.set("PAUSED", "Manual ARM is required after every restart.");
+    if (this.completed === c.market.conditionId) return void this.set("FILLED", "One trade has already completed for this five-minute condition.");
+    if (this.completed && this.completed !== c.market.conditionId) { clear(this.journalPath); this.completed = null; }
+    const bad = this.entryBlock(c); if (bad) return void this.set("WAITING_FOR_MARKET", bad);
+    const side = c.signal.selectedDirection!; const ask = side === "UP" ? c.quotes.yesBestAsk! : c.quotes.noBestAsk!;
+    const limit = cents(Math.min(ask + 0.01, MAX_ENTRY_PRICE_PUSD)); const shares = sharesFor(c.walletBalancePusd! * WALLET_STAKE_FRACTION, c.walletBalancePusd!, limit);
+    if (!shares) return void this.set("WAITING_FOR_MARKET", "Verified wallet cannot fund a valid 10% initial order.");
+    this.status.conditionId = c.market.conditionId; this.status.side = side; this.status.plannedShares = shares; this.status.remainingShares = shares; this.status.plannedCostPusd = cents(shares * limit); this.status.entryPricePusd = limit; this.status.directionReason = c.signal.reason; this.tokenId = side === "UP" ? c.market.yesTokenId! : c.market.noTokenId!; this.oppositeTokenId = side === "UP" ? c.market.noTokenId! : c.market.yesTokenId!; this.phase = "ENTRY"; this.persist();
+    this.set("SUBMITTING", `Submitting ${side} FAK BUY at observed ask + 0.01, capped at 0.82.`);
+    this.submissionId = this.newSubmissionId(); this.persist();
+    const r = await this.helper("submit_fak_buy", { tokenId: this.tokenId, leg: side, price: limit, size: shares, clientId: this.submissionId }); const id = r.orders?.[0]?.orderId ?? null;
+    if (this.stopRequested) { this.status.entryOrderId = id; this.persist(); return; }
+    if (!r.ok || !id) { clear(this.journalPath); this.reset(); return void this.set("WAITING_FOR_MARKET", `Initial FAK was rejected: ${r.code ?? "UNKNOWN"}.`); }
+    this.status.entryOrderId = id; this.status.unresolvedOrder = true; this.persist(); await this.reconcileEntry();
+  }
+  private entryBlock(c: PairExecutionCandidate): string | null {
+    if (!this.bridgeAvailable()) return "CLOB bridge or credentials unavailable.";
+    if (!c.ready || !c.quotes.fresh) return "Fresh Binance, market, and CLOB quotes are required.";
+    if (!c.market.conditionId || !c.market.yesTokenId || !c.market.noTokenId || c.market.endAt === null) return "Verified active BTC five-minute market required.";
+    if (!c.signal.confirmed || !c.signal.selectedDirection) return c.signal.reason;
+    const ask = c.signal.selectedDirection === "UP" ? c.quotes.yesBestAsk : c.quotes.noBestAsk;
+    if (ask === null || !isEntryPriceWithinBand(ask)) return "Selected observed ask must be within the server-side 0.40–0.82 cap.";
+    if (c.walletFresh === false || c.walletBalancePusd === null || c.walletBalancePusd <= 0) return "Fresh verified positive wallet balance required.";
+    if (c.inventory.fresh === false || c.inventory.yesShares === null || c.inventory.noShares === null || c.inventory.yesShares > .01 || c.inventory.noShares > .01) return "Fresh zero Up/Down inventory is required.";
+    return null;
+  }
+  private async manage(c: PairExecutionCandidate) {
+    if (!this.status.armed) return void this.set("PAUSED", "Manual ARM required to resume the persisted order lifecycle.");
+    if (this.phase === "ENTRY") return void await this.reconcileEntry();
+    if (this.phase === "DEFENSE") return void await this.reconcileDefense();
+    if (this.phase === "TRACK_C_ENTRY") return void await this.reconcileSecondEntry();
+    if (this.phase === "TRACK_C_EXIT") return void await this.manageSecondExit(c);
+    if (this.phase === "SETTLEMENT_WAIT") {
+      if (c.market.conditionId && c.market.conditionId !== this.status.conditionId) { this.phase = "COMPLETE"; this.persist(); this.completed = this.status.conditionId; this.reset(); return void await this.enter(c); }
+      return void this.set("SETTLEMENT_WAIT", "Defense fill is confirmed; take-profit actions are disabled pending market settlement.");
+    }
+    await this.reconcileDefense();
+    if (this.phase !== "TRACK_A") return;
+    const side = this.status.side!; const bid = side === "UP" ? c.quotes.yesBestBid : c.quotes.noBestBid;
+    const reversal = c.signal.confirmed && c.signal.selectedDirection === opposite(side);
+    if (reversal) return void await this.startTrackC(c);
+    if (bid !== null && c.quotes.fresh && this.status.entryPricePusd !== null && bid >= this.status.entryPricePusd + .05) await this.startTrackA(bid);
+    else this.set("WAITING_DUAL_TRACK", "Defense is resting; waiting for original +0.05 bid or confirmed opposite Binance reversal.");
+  }
+  private async reconcileEntry() {
+    if (!this.status.entryOrderId) this.status.entryOrderId = await this.recover(this.tokenId);
+    const o = await this.order(this.status.entryOrderId); if (!o) return void this.unknown("Initial FAK status unavailable.");
+    const matched = n(o.sizeMatched) ?? 0; const st = String(o.status ?? "UNKNOWN");
+    const executed = n(o.executedPrice);
+    if (matched > 0 && (filled(st) || terminal(st))) {
+      if (executed === null || executed <= 0) return void this.unknown("Initial fill price cannot be proven from CLOB execution data.");
+      this.status.remainingShares = matched; this.status.plannedShares = matched; this.status.entryPricePusd = executed; this.status.plannedCostPusd = cents(matched * executed); this.status.unresolvedOrder = false; this.phase = "DEFENSE"; this.persist(); return void await this.placeDefense();
+    }
+    if (matched === 0 && terminal(st)) { clear(this.journalPath); this.reset(); return void this.set("WAITING_FOR_MARKET", "Initial FAK ended with no fill."); }
+    this.set("VERIFYING", `Initial FAK is ${st}; duplicate entries are blocked.`);
+  }
+  private async placeDefense() {
+    if (this.stopRequested) return;
+    const price = calculateDefensePrice(this.status.entryPricePusd!); if (!price || !this.oppositeTokenId) return void this.unknown("Cannot calculate valid defense order.");
+    this.status.defensePricePusd = price; this.status.defenseShares = this.status.remainingShares; this.set("PLACING_DEFENSE", "Initial fill confirmed; placing opposite GTC defense before monitoring either track."); this.persist();
+    this.submissionId = this.newSubmissionId(); this.persist();
+    const r = await this.helper("submit_gtc_buy", { tokenId: this.oppositeTokenId, leg: opposite(this.status.side!), price, size: this.status.remainingShares, clientId: this.submissionId });
+    const id = r.orders?.[0]?.orderId ?? null; if (!r.ok || !id) return void this.unknown(`Defense GTC rejected: ${r.code ?? "UNKNOWN"}.`);
+    if (this.stopRequested) { this.status.defenseOrderId = id; this.persist(); return; }
+    this.status.defenseOrderId = id; this.phase = "TRACK_A"; this.persist(); await this.reconcileDefense();
+  }
+  private async reconcileDefense() {
+    if (!this.status.defenseOrderId) this.status.defenseOrderId = await this.recover(this.oppositeTokenId);
+    if (!this.status.defenseOrderId) return void this.unknown("Defense order recovery was not unique.");
+    if (Date.now() - this.lastPoll < 100) return; this.lastPoll = Date.now();
+    const o = await this.order(this.status.defenseOrderId); if (!o) return void this.unknown("Defense status unavailable.");
+    const matched = n(o.sizeMatched) ?? 0; const required = this.status.defenseShares ?? this.status.remainingShares ?? Infinity; const st = String(o.status ?? "UNKNOWN");
+    this.status.defenseMatchedShares = matched;
+    if (matched >= required - .0001 || (matched > 0 && filled(st))) { this.status.branch = "B"; this.phase = "SETTLEMENT_WAIT"; this.persist(); return void this.set("SETTLEMENT_WAIT", "Defense GTC fully filled; original take-profit and secondary actions are permanently disabled."); }
+    if (matched > .0001) {
+      this.status.branch = "B"; this.persist(); this.set("CANCELING_DEFENSE", "Defense partially filled; canceling and reconciling its remaining GTC before settlement wait.");
+      if (!await this.cancelDefense()) {
+        if (this.phase === "SETTLEMENT_WAIT") return;
+        return void this.unknown("Partial defense remaining GTC cannot be conclusively canceled.");
       }
-      const matched = finiteNumber(order.sizeMatched);
+      this.phase = "SETTLEMENT_WAIT"; this.persist(); return void this.set("SETTLEMENT_WAIT", "Partial defense GTC was canceled and reconciled; take-profit actions are disabled pending settlement.");
+    }
+    if (terminal(st)) return void this.unknown(`Defense became ${st} without a fill.`);
+  }
+  private async cancelDefense(): Promise<boolean> {
+    if (!this.status.defenseOrderId) return false;
+    const r = await this.helper("cancel_orders", { orderIds: [this.status.defenseOrderId] }); if (!r.ok) return false;
+    const o = await this.order(this.status.defenseOrderId); if (!o) return false;
+    const matched = n(o.sizeMatched) ?? 0;
+    if (matched > .0001) { this.status.defenseMatchedShares = matched; this.status.branch = "B"; this.phase = "SETTLEMENT_WAIT"; this.persist(); this.set("SETTLEMENT_WAIT", "Defense cancellation raced a fill; settlement wait is mandatory."); return false; }
+    if (!terminal(String(o.status ?? ""))) return false;
+    this.status.defenseOrderId = null; return true;
+  }
+  private async startTrackA(bid: number) {
+    this.status.branch = "A"; this.set("CANCELING_DEFENSE", "Original bid reached +0.05; canceling and reconciling defense before original FAK sale."); if (!await this.cancelDefense()) { if (this.phase === "SETTLEMENT_WAIT") return; return void this.unknown("Defense cancellation is not conclusively reconciled."); }
+    this.phase = "TRACK_A"; this.persist(); await this.sell(this.tokenId!, this.status.side!, this.status.remainingShares!, bid, "A");
+  }
+  private async startTrackC(c: PairExecutionCandidate) {
+    if (this.stopRequested) return;
+    this.status.branch = "C"; this.set("CANCELING_DEFENSE", "Confirmed opposite Binance wall/flow reversal; canceling defense before secondary entry."); if (!await this.cancelDefense()) { if (this.phase === "SETTLEMENT_WAIT") return; return void this.unknown("Defense cancellation is not conclusively reconciled."); }
+    const side = opposite(this.status.side!); const ask = side === "UP" ? c.quotes.yesBestAsk : c.quotes.noBestAsk; if (ask === null || c.walletBalancePusd === null) return void this.unknown("Fresh opposite ask and verified wallet required for reversal.");
+    const plan = calculateDynamicHedgeBudget(this.status.plannedCostPusd!, ask, c.walletBalancePusd); const limit = cents(ask + .02); if (!plan || limit >= 1) return void this.unknown("Reversal hedge budget or price is invalid.");
+    const shares = sharesFor(plan.budgetPusd, c.walletBalancePusd, limit); if (!shares) return void this.unknown("Verified wallet cannot fund reversal hedge.");
+    this.status.secondSide = side; this.status.secondShares = shares; this.status.secondEntryPricePusd = limit; this.status.secondTargetPusd = plan.targetPusd; this.phase = "TRACK_C_ENTRY"; this.persist(); this.set("TRACK_C_SUBMITTING", `Submitting opposite FAK BUY; target is ${plan.targetPusd.toFixed(2)}.`);
+    this.submissionId = this.newSubmissionId(); this.persist();
+    const r = await this.helper("submit_fak_buy", { tokenId: this.oppositeTokenId!, leg: side, price: limit, size: shares, clientId: this.submissionId }); const id = r.orders?.[0]?.orderId ?? null;
+    if (this.stopRequested) { this.status.secondEntryOrderId = id; this.persist(); return; }
+    if (!r.ok || !id) return void this.unknown(`Secondary FAK rejected: ${r.code ?? "UNKNOWN"}.`); this.status.secondEntryOrderId = id; this.persist(); await this.reconcileSecondEntry();
+  }
+  private async reconcileSecondEntry() {
+    if (!this.status.secondEntryOrderId) this.status.secondEntryOrderId = await this.recover(this.oppositeTokenId);
+    const o = await this.order(this.status.secondEntryOrderId); if (!o) return void this.unknown("Secondary FAK status unavailable.");
+    const matched = n(o.sizeMatched) ?? 0; const st = String(o.status ?? "UNKNOWN");
+    const executed = n(o.executedPrice);
+    if (matched > 0 && (filled(st) || terminal(st))) {
+      if (executed === null || executed <= 0) return void this.unknown("Secondary fill price cannot be proven from CLOB execution data.");
+      this.status.secondShares = matched; this.status.secondEntryPricePusd = executed; this.phase = "TRACK_C_EXIT"; this.persist(); return void this.set("TRACK_C_WAITING_TAKE_PROFIT", "Secondary opposite position filled; original position remains for settlement.");
+    }
+    if (matched === 0 && terminal(st)) return void this.unknown("Secondary FAK terminated with zero fill; original position remains for settlement.");
+    this.set("VERIFYING", `Secondary FAK is ${st}; duplicate secondary orders are blocked.`);
+  }
+  private async manageSecondExit(c: PairExecutionCandidate) {
+    const bid = this.status.secondSide === "UP" ? c.quotes.yesBestBid : c.quotes.noBestBid;
+    if (bid === null || !c.quotes.fresh || this.status.secondTargetPusd === null || bid < this.status.secondTargetPusd) return void this.set("TRACK_C_WAITING_TAKE_PROFIT", "Waiting for secondary opposite bid to reach dynamic target; original remains for settlement.");
+    await this.sell(this.oppositeTokenId!, this.status.secondSide!, this.status.secondShares!, bid, "C");
+  }
+  private async sell(tokenId: string, side: Direction, size: number, bid: number, branch: "A" | "C") {
+    if (this.stopRequested) return;
+    this.submissionId = this.newSubmissionId(); this.persist();
+    this.set("EXITING", `Submitting ${side} FAK SELL at current best bid.`); const r = await this.helper("submit_fak_sell", { tokenId, leg: side, price: cents(bid), size, clientId: this.submissionId }); const id = r.orders?.[0]?.orderId ?? null;
+    if (this.stopRequested) { this.status.exitOrderId = id; this.persist(); return; }
+    if (!r.ok || !id) return void this.unknown(`FAK sell rejected: ${r.code ?? "UNKNOWN"}.`); this.status.exitOrderId = id; this.persist();
+    const o = await this.order(id); if (!o) return void this.unknown("FAK sell status unavailable."); const matched = n(o.sizeMatched) ?? 0;
+    if (matched + .0001 < size) return void this.unknown("FAK sell partial or unknown; no duplicate sale will be submitted.");
+    if (branch === "A") { const condition = this.status.conditionId; this.phase = "COMPLETE"; this.persist(); this.reset(); this.completed = condition; this.set("FILLED", "Track A original take-profit completed; condition is closed to further trades."); }
+    else { this.phase = "SETTLEMENT_WAIT"; this.persist(); this.set("SETTLEMENT_WAIT", "Track C secondary take-profit completed; original position remains for settlement."); }
+  }
+  private async order(id: string | null): Promise<Order | null> { if (!id) return null; const r = await this.helper("get_orders", { orderIds: [id] }); return r.ok && r.orders?.length === 1 ? r.orders[0] : null; }
+  private async recover(tokenId: string | null): Promise<string | null> {
+    if (!tokenId || !this.submissionId) return null;
+    const r = await this.helper("recover_order", { tokenId, clientId: this.submissionId });
+    if (r.ok && r.orders?.length === 1 && typeof r.orders[0].orderId === "string") return r.orders[0].orderId;
+    this.status.unresolvedOrder = true; this.persist();
+    this.set("HALTED", "Submission recovery produced zero or multiple matches; operator reconciliation is required.");
+    return null;
+  }
+  private async helper(action: "submit_fak_buy" | "submit_fak_sell" | "submit_gtc_buy" | "cancel_orders" | "get_orders" | "recover_order", payload: Record<string, unknown>): Promise<Result> {
+    if (this.stopRequested && action.startsWith("submit_")) throw new Error("STOP_FENCE");
+    if (this.helperOverride) return this.helperOverride(action, payload);
+    const p = python(); if (!p || !existsSync(EXECUTION_HELPER)) throw new Error("CLOB execution bridge unavailable");
+    const { stdout, stderr } = await execFileAsync(p, [EXECUTION_HELPER, action, JSON.stringify(payload)], { timeout: 20_000, maxBuffer: 16 * 1024 });
+    if (stderr.trim()) logger.warn({ action, diagnostic: stderr.trim() }, "CLOB helper diagnostic"); return JSON.parse(stdout) as Result;
+  }
+  private persist() { if (!this.phase || !this.status.conditionId || !this.status.side || !this.tokenId || !this.oppositeTokenId || this.status.entryPricePusd === null || this.status.plannedShares === null) return; const loaded = load(this.journalPath); const createdAt = loaded.kind === "VALID" ? loaded.journal.createdAt : iso(Date.now()); save({ phase: this.phase, conditionId: this.status.conditionId, side: this.status.side, tokenId: this.tokenId, oppositeTokenId: this.oppositeTokenId, entryOrderId: this.status.entryOrderId, defenseOrderId: this.status.defenseOrderId, secondEntryOrderId: this.status.secondEntryOrderId, exitOrderId: this.status.exitOrderId, submissionId: this.submissionId, stopRequested: this.stopRequested, entryPricePusd: this.status.entryPricePusd, shares: this.status.plannedShares, defensePricePusd: this.status.defensePricePusd, defenseMatchedShares: this.status.defenseMatchedShares, secondSide: this.status.secondSide, secondShares: this.status.secondShares, secondEntryPricePusd: this.status.secondEntryPricePusd, secondTargetPusd: this.status.secondTargetPusd, branch: this.status.branch, createdAt, updatedAt: iso(Date.now()) }, this.journalPath); }
+  private bridgeAvailable() { return this.bridgeAvailableOverride ?? isCLOBSingleLegBridgeAvailable(); }
+  private newSubmissionId() { return `0x${createHash("sha256").update(randomUUID()).digest("hex")}`; }
+  private async finalizeStop() {
+    if (this.phase === "ENTRY") {
+      if (!this.status.entryOrderId) this.status.entryOrderId = await this.recover(this.tokenId);
+      if (!this.status.entryOrderId) return void this.unknown("Deferred stop cannot uniquely recover the initial FAK.");
+      const order = await this.order(this.status.entryOrderId);
+      if (!order) return void this.unknown("Deferred stop cannot determine initial FAK status.");
+      const matched = n(order.sizeMatched) ?? 0;
       const status = String(order.status ?? "UNKNOWN");
-      if (matched !== null && matched > 0 && (isFilled(status) || isTerminal(status) || matched >= (this.status.plannedShares ?? Infinity))) {
-        const entryPrice = finiteNumber(order.price) ?? this.entryLimitPrice;
-        const plannedShares = this.status.plannedShares;
-        if (entryPrice === null || plannedShares === null) {
-          this.setState("VERIFYING", "Entry filled quantity or price is incomplete; waiting for another lifecycle read.");
-          return;
-        }
-        this.status.entryPricePusd = entryPrice;
-        this.status.plannedCostPusd = roundToCents(entryPrice * matched);
+      if (matched > 0) {
+        const executed = n(order.executedPrice);
         this.status.remainingShares = matched;
-        this.status.takeProfitPricePusd = roundToCents(entryPrice + EXIT_TRIGGER_PRICE_OFFSET_PUSD);
-        this.status.unresolvedOrder = false;
-        this.positionConfirmed = true;
-        this.recordExecutionJournal("POSITION");
-        this.setState("WAITING_FOR_TAKE_PROFIT", `${this.status.side} entry filled at ${entryPrice.toFixed(2)}; sell trigger is entry price + 0.05 pUSD (${this.status.takeProfitPricePusd.toFixed(2)}).`);
-        return;
+        this.status.plannedShares = matched;
+        if (executed !== null && executed > 0) {
+          this.status.entryPricePusd = executed;
+          this.status.plannedCostPusd = cents(executed * matched);
+        }
+        this.status.unresolvedOrder = true;
+        this.persist();
+        return void this.set("PAUSED", "Stop reconciled a filled initial FAK; exposed inventory is journaled and requires operator reconciliation. No defense was submitted.");
       }
-      if (matched === 0 && isTerminal(status)) {
-        this.status.unresolvedOrder = false;
-        clearExecutionJournal();
-        this.clearExecution();
-        this.scheduleCooldown("The FAK entry terminated with zero matched quantity.");
-        return;
-      }
-      this.status.unresolvedOrder = true;
-      this.setState("VERIFYING", `Entry order is ${status}; waiting for a definitive fill result.`);
-    } catch (error) {
-      const detail = error instanceof Error && error.message ? ` (${error.message.slice(0, 160)})` : "";
-      this.status.unresolvedOrder = true;
-      this.setState("VERIFYING", `Entry verification failed; new entries remain blocked${detail}.`);
-    } finally {
-      this.reconciling = false;
+      if (!terminal(status)) return void this.unknown(`Deferred stop found initial FAK status ${status}; holdings remain unknown.`);
     }
-  }
-
-  private async managePosition(candidate: PairExecutionCandidate): Promise<void> {
-    if (!this.status.side || !this.tokenId || !this.status.remainingShares || this.status.remainingShares <= 0) {
-      return;
-    }
-    if (this.status.exitOrderId) {
-      await this.reconcileExit();
-      return;
-    }
-    if (this.retryAfterAt > Date.now()) {
-      this.setState("EXIT_RETRYING", "Exit retry cooldown is active; remaining shares stay protected and will be sold until the position is zero.");
-      return;
-    }
-    const bestBid = this.status.side === "UP" ? candidate.quotes.yesBestBid : candidate.quotes.noBestBid;
-    if (bestBid === null || !candidate.quotes.fresh) {
-      this.setState(
-        this.status.exitTriggered ? "EXIT_RETRYING" : "WAITING_FOR_TAKE_PROFIT",
-        this.status.exitTriggered
-          ? "Waiting for a fresh executable bid; unsold shares will keep retrying until the position is zero."
-          : "Waiting for the selected token to reach the entry price + 0.05 pUSD sell trigger.",
-      );
-      return;
-    }
-    const target = this.status.takeProfitPricePusd;
-    if (target === null) return;
-    // Once the target has been reached, use the live best bid as a marketable
-    // FAK price. FAK executes immediately against available bids and cancels
-    // anything it cannot fill; retries re-read the current bid instead of
-    // waiting for the old target/floor to return.
-    if (!this.status.exitTriggered && bestBid < target) {
-      this.setState("WAITING_FOR_TAKE_PROFIT", `Waiting for ${this.status.side} bid to reach the ${target.toFixed(2)} sell trigger (entry + 0.05 pUSD).`);
-      return;
-    }
-    this.status.exitTriggered = true;
-    const marketSellPrice = roundToCents(bestBid);
-    this.status.exitSellFloorPusd = marketSellPrice;
-    await this.submitExit(marketSellPrice);
-  }
-
-  private async submitExit(marketSellPrice: number): Promise<void> {
-    if (!this.tokenId || !this.status.side || !this.status.remainingShares || this.status.remainingShares <= 0) return;
-    this.status.lastExitError = null;
-    this.status.unresolvedOrder = false;
-    this.setState("EXITING", `Selling ${this.status.side} immediately with a market-style FAK at the live best bid.`);
-    try {
-      this.recordExecutionJournal("EXITING");
-      const response = await this.callHelper("submit_fak_sell", {
-        tokenId: this.tokenId,
-        leg: this.status.side,
-        price: marketSellPrice,
-        size: this.status.remainingShares,
-      });
-      const orderId = response.orders?.[0]?.orderId ?? null;
-      this.status.exitOrderId = orderId;
-      if (response.ok !== true || !orderId) {
-        this.status.lastExitError = `${response.code ?? "EXIT_REJECTED"}${response.detail ? `: ${response.detail}` : ""}`;
-        this.status.unresolvedOrder = false;
-        this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-        this.setState("EXIT_RETRYING", `Exit was not completed; retrying until the ${this.status.side} position is zero.`);
-        return;
-      }
-      this.setState("EXITING", "Exit order accepted; confirming the quantity sold.");
-      await this.reconcileExit();
-    } catch (error) {
-      this.status.lastExitError = error instanceof Error ? error.message.slice(0, 180) : "Exit helper failed.";
-      this.status.unresolvedOrder = false;
-      this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-      this.setState("EXIT_RETRYING", "Exit result is unknown; new entries are paused and unsold shares will keep retrying until the position is zero.");
-    }
-  }
-
-  private async reconcileExit(): Promise<void> {
-    if (!this.status.exitOrderId || this.reconciling) return;
-    if (Date.now() - this.lastReconcileAt < RECONCILE_INTERVAL_MS) return;
-    this.reconciling = true;
-    this.lastReconcileAt = Date.now();
-    try {
-      const response = await this.callHelper("get_orders", { orderIds: [this.status.exitOrderId] });
-      const order = response.ok === true && response.orders?.length === 1 ? response.orders[0] : null;
-      if (!order) {
-        this.status.lastExitError = "Exit order status is temporarily unavailable.";
-        this.status.unresolvedOrder = false;
-        this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-        this.setState("EXIT_RETRYING", "Exit result is unknown; retrying status and sale until all remaining shares are cleared.");
-        return;
-      }
-      const matched = finiteNumber(order.sizeMatched) ?? 0;
-      const currentRemaining = this.status.remainingShares ?? 0;
-      this.status.remainingShares = Math.max(0, Number((currentRemaining - matched).toFixed(4)));
+    if (this.phase === "TRACK_A" && (this.status.exitOrderId || this.status.state === "EXITING")) {
+      if (!this.status.exitOrderId && this.submissionId) this.status.exitOrderId = await this.recover(this.tokenId);
+      if (!this.status.exitOrderId) return void this.unknown("Deferred stop cannot uniquely recover the Track-A exit; original holdings remain exposed.");
+      const order = await this.order(this.status.exitOrderId);
+      if (!order) return void this.unknown("Deferred stop cannot determine Track-A exit status.");
+      const matched = n(order.sizeMatched) ?? 0;
+      const required = this.status.remainingShares ?? this.status.plannedShares ?? Infinity;
       const status = String(order.status ?? "UNKNOWN");
-      if (this.status.remainingShares <= 0.0001) {
-        const completedConditionId = this.status.conditionId;
-        this.status.remainingShares = 0;
-        this.status.unresolvedOrder = false;
-        this.status.exitOrderId = null;
-        this.status.lastExitError = null;
-        clearExecutionJournal();
-        this.completedConditionId = completedConditionId;
-        this.tokenId = null;
-        this.entryLimitPrice = null;
-        this.positionConfirmed = false;
-        this.setState("FILLED", "Position fully sold after the entry + 0.05 pUSD sell trigger.");
-        return;
+      if (matched >= required - .0001 && (filled(status) || terminal(status))) {
+        this.stopRequested = false;
+        this.phase = "COMPLETE";
+        this.persist();
+        this.completed = this.status.conditionId;
+        return void this.set("HALTED", "Deferred stop confirmed the Track-A exit fully completed; no tracked holdings remain.");
       }
-      this.status.exitOrderId = null;
-      this.status.unresolvedOrder = false;
-      this.status.lastExitError = isTerminal(status) ? `Exit ${status.toLowerCase()} with ${this.status.remainingShares} shares remaining.` : null;
-      this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-      this.recordExecutionJournal("EXITING");
-      this.setState("EXIT_RETRYING", `Exit incomplete (${status}); ${this.status.remainingShares} shares remain and will keep retrying until the position is zero.`);
-    } catch (error) {
-      this.status.lastExitError = error instanceof Error ? error.message.slice(0, 180) : "Exit status lookup failed.";
-      this.status.unresolvedOrder = false;
-      this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-      this.setState("EXIT_RETRYING", "Exit status is unknown; retrying until all remaining shares are cleared, without new entries.");
-    } finally {
-      this.reconciling = false;
+      this.status.remainingShares = Math.max(0, Number((required - matched).toFixed(4)));
+      this.status.unresolvedOrder = true;
+      this.persist();
+      return void this.set("PAUSED", `Track-A exit is ${status} with ${matched} matched; residual/unknown holdings require operator reconciliation.`);
     }
-  }
-
-  private hasPosition(): boolean {
-    return this.positionConfirmed && this.status.remainingShares !== null && this.status.remainingShares > 0.0001;
-  }
-
-  private clearExecution(options: { preserveCompletion?: boolean } = {}): void {
-    this.status.conditionId = options.preserveCompletion ? this.status.conditionId : null;
-    this.status.side = null;
-    this.status.entryOrderId = null;
-    this.status.exitOrderId = null;
-    this.status.unresolvedOrder = false;
-    this.status.plannedShares = null;
-    this.status.plannedCostPusd = null;
-    this.status.entryPricePusd = null;
-    this.status.takeProfitPricePusd = null;
-    this.status.remainingShares = null;
-    this.status.exitSellFloorPusd = null;
-    this.status.exitTriggered = false;
-    this.status.directionReason = null;
-    this.status.entryCombinedAskPusd = null;
-    this.tokenId = null;
-    this.entryLimitPrice = null;
-    this.positionConfirmed = false;
-  }
-
-  private scheduleCooldown(reason: string): void {
-    this.retryAfterAt = Date.now() + RETRY_COOLDOWN_MS;
-    this.setState("WAITING_FOR_MARKET", `${reason} Automatic retry resumes after a short cooldown.`);
-  }
-
-  private recordExecutionJournal(phase: ExecutionJournal["phase"]): void {
-    if (
-      !this.status.conditionId ||
-      !this.status.side ||
-      !this.tokenId ||
-      this.status.entryPricePusd === null ||
-      this.status.plannedShares === null ||
-      this.status.remainingShares === null ||
-      this.status.takeProfitPricePusd === null
-    ) {
-      return;
+    if (this.phase === "TRACK_C_ENTRY" || this.phase === "TRACK_C_EXIT") {
+      const id = this.phase === "TRACK_C_ENTRY" ? this.status.secondEntryOrderId : this.status.exitOrderId;
+      const order = await this.order(id);
+      if (!order) return void this.unknown("Deferred stop cannot determine secondary entry/exit status.");
+      this.status.unresolvedOrder = true;
+      this.persist();
+      return void this.set("PAUSED", "Stop reconciled an active secondary entry/exit lifecycle; journaled holdings require operator reconciliation.");
     }
-    const now = new Date().toISOString();
-    const existing = loadExecutionJournal();
-    persistExecutionJournal({
-      phase,
-      conditionId: this.status.conditionId,
-      side: this.status.side,
-      tokenId: this.tokenId,
-      entryOrderId: this.status.entryOrderId,
-      exitOrderId: this.status.exitOrderId,
-      entryPricePusd: this.status.entryPricePusd,
-      plannedShares: this.status.plannedShares,
-      remainingShares: this.status.remainingShares,
-      takeProfitPricePusd: this.status.takeProfitPricePusd,
-      exitSellFloorPusd: this.status.exitSellFloorPusd,
-      exitTriggered: this.status.exitTriggered,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-    });
+    if (!this.status.defenseOrderId && this.phase === "DEFENSE") this.status.defenseOrderId = await this.recover(this.oppositeTokenId);
+    if (this.status.state === "HALTED" && !this.status.defenseOrderId) return;
+    if (this.status.defenseOrderId && !await this.cancelDefense()) return void this.unknown("Deferred stop cannot conclusively reconcile defense.");
+    this.stopRequested = false; this.persist(); this.set("HALTED", "Deferred stop completed; known resting defense is conclusively reconciled and submissions remain fenced.");
   }
-
-  private async callHelper(
-    action: "submit_fak_buy" | "submit_fak_sell" | "get_orders",
-    payload: Record<string, unknown>,
-  ): Promise<HelperResult & OrderStatusResult> {
-    const python = executionPython();
-    if (!python || !existsSync(EXECUTION_HELPER)) throw new Error("Single-leg CLOB execution bridge is unavailable");
-    const { stdout, stderr } = await execFileAsync(
-      python,
-      [EXECUTION_HELPER, action, JSON.stringify(payload)],
-      { timeout: 20_000, maxBuffer: 16 * 1024 },
-    );
-    if (stderr.trim()) logger.warn({ action, diagnostic: stderr.trim() }, "CLOB helper diagnostic output");
-    return JSON.parse(stdout) as HelperResult & OrderStatusResult;
-  }
-
-  private setState(state: AutomaticPairExecutionStatus["state"], reason: string): void {
-    const changed = this.status.state !== state || this.status.reason !== reason;
-    this.status.state = state;
-    this.status.reason = reason;
-    if (changed) {
-      this.status.lastActionAt = asIso(Date.now());
-      logger.info({ state, reason }, "Directional single-leg execution state changed");
-    }
-  }
+  private unknown(reason: string) { this.status.unresolvedOrder = true; this.persist(); this.set("PAUSED", `${reason} Fail-closed: manual ARM/reconciliation is required.`); }
+  private reset() { this.phase = null; this.tokenId = null; this.oppositeTokenId = null; Object.assign(this.status, { conditionId: null, side: null, entryOrderId: null, defenseOrderId: null, secondEntryOrderId: null, exitOrderId: null, unresolvedOrder: false, plannedShares: null, plannedCostPusd: null, entryPricePusd: null, defensePricePusd: null, defenseShares: null, defenseMatchedShares: null, takeProfitPricePusd: null, remainingShares: null, secondSide: null, secondShares: null, secondEntryPricePusd: null, secondTargetPusd: null, directionReason: null, branch: null, lastError: null }); }
+  private set(state: AutomaticPairExecutionStatus["state"], reason: string) { const changed = this.status.state !== state || this.status.reason !== reason; this.status.state = state; this.status.reason = reason; if (changed) { this.status.lastActionAt = iso(Date.now()); logger.info({ state, reason }, "Binance dual-track execution state changed"); } }
 }
+export function createAutomaticPairExecutionSupervisor(options: SupervisorOptions = {}) { return new AutomaticPairExecutionSupervisor(options); }
