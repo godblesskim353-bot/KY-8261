@@ -12,10 +12,13 @@ const EXECUTION_JOURNAL_PATH = process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_P
   ? path.resolve(process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_PATH.trim())
   : path.resolve(API_SERVER_DIR, ".automatic-single-execution-journal.json");
 
-export const MAX_COMBINED_ASK = 0.99;
+export const MAX_COMBINED_ASK = 1;
 export const WALLET_STAKE_FRACTION = 0.1;
-export const TAKE_PROFIT_INCREMENT_PUSD = 0.02;
-export const MAX_EXIT_SLIPPAGE_FRACTION = 0.01;
+/**
+ * Absolute price offset, not a wallet-level profit target.
+ * Example: entry at 0.65 pUSD sets the sell trigger at 0.70 pUSD.
+ */
+export const EXIT_TRIGGER_PRICE_OFFSET_PUSD = 0.05;
 const RECONCILE_INTERVAL_MS = 500;
 const RETRY_COOLDOWN_MS = 15_000;
 const EXIT_RETRY_MS = 750;
@@ -25,7 +28,7 @@ const ORDER_POLL_MS = 250;
 export type Direction = "UP" | "DOWN";
 
 export type AutomaticPairExecutionStatus = {
-  mode: "CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK";
+  mode: "CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK";
   enabled: boolean;
   armed: boolean;
   state:
@@ -277,7 +280,7 @@ export const isCLOBTwoLegBridgeAvailable = isCLOBSingleLegBridgeAvailable;
 
 export class AutomaticPairExecutionSupervisor {
   private status: AutomaticPairExecutionStatus = {
-    mode: "CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK",
+    mode: "CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK",
     enabled: false,
     armed: false,
     state: "DISABLED",
@@ -452,17 +455,17 @@ export class AutomaticPairExecutionSupervisor {
     }
     const { yesBestAsk, noBestAsk, combinedAsk } = candidate.quotes;
     if (yesBestAsk === null || noBestAsk === null || combinedAsk === null || yesBestAsk <= 0 || noBestAsk <= 0) {
-      return "Both Up and Down asks are required for the <99¢ mispricing gate.";
+      return "Both Up and Down asks are required for the <100¢ mispricing gate.";
     }
     if (combinedAsk >= MAX_COMBINED_ASK) {
-      return "Entry waits for Up ask + Down ask to be strictly below 99¢.";
+      return "Entry waits for Up ask + Down ask to be strictly below 100¢.";
     }
     if (!candidate.signal.confirmed || !candidate.signal.selectedDirection) {
       return candidate.signal.reason;
     }
     const selectedAsk = candidate.signal.selectedDirection === "UP" ? yesBestAsk : noBestAsk;
-    if (selectedAsk + TAKE_PROFIT_INCREMENT_PUSD >= 1) {
-      return "Selected token cannot reach the +2¢ take-profit target below the 100¢ ceiling.";
+    if (selectedAsk + EXIT_TRIGGER_PRICE_OFFSET_PUSD >= 1) {
+      return "Selected token's entry + 0.05 pUSD price trigger would be at or above 1.00 pUSD.";
     }
     if (
       candidate.inventory.yesShares === null ||
@@ -502,7 +505,7 @@ export class AutomaticPairExecutionSupervisor {
     this.status.plannedShares = shares;
     this.status.plannedCostPusd = roundToCents(shares * ask);
     this.status.entryPricePusd = ask;
-    this.status.takeProfitPricePusd = roundToCents(ask + TAKE_PROFIT_INCREMENT_PUSD);
+    this.status.takeProfitPricePusd = roundToCents(ask + EXIT_TRIGGER_PRICE_OFFSET_PUSD);
     this.status.remainingShares = shares;
     this.status.directionReason = candidate.signal.reason;
     this.status.entryCombinedAskPusd = candidate.quotes.combinedAsk;
@@ -515,10 +518,10 @@ export class AutomaticPairExecutionSupervisor {
     this.status.exitSellFloorPusd = null;
     this.tokenId = tokenId;
     this.entryLimitPrice = ask;
-    this.setState("SUBMITTING", `Submitting one ${side} FOK buy after the <99¢ mispricing gate.`);
+    this.setState("SUBMITTING", `Submitting one ${side} market-style FAK buy after the <100¢ mispricing gate.`);
     try {
       this.recordExecutionJournal("ENTRY");
-      const response = await this.callHelper("submit_fok_buy", {
+      const response = await this.callHelper("submit_fak_buy", {
         tokenId,
         leg: side,
         price: ask,
@@ -531,13 +534,13 @@ export class AutomaticPairExecutionSupervisor {
         this.status.lastAttemptOutcome = `REJECTED${detail || " (no code returned)"}`;
         clearExecutionJournal();
         this.clearExecution();
-        this.scheduleCooldown(`The ${side} FOK entry was rejected before a confirmed fill.${detail}`);
+        this.scheduleCooldown(`The ${side} FAK entry was rejected before a confirmed fill.${detail}`);
         return;
       }
       this.status.lastAttemptOutcome = "ACCEPTED";
       this.status.unresolvedOrder = true;
       this.recordExecutionJournal("ENTRY");
-      this.setState("VERIFYING", `${side} FOK buy accepted; confirming the single-leg fill.`);
+      this.setState("VERIFYING", `${side} FAK buy accepted; confirming the single-leg fill.`);
       await this.reconcileEntry(candidate);
     } catch (error) {
       const detail = error instanceof Error && error.message ? ` (${error.message.slice(0, 180)})` : "";
@@ -574,18 +577,18 @@ export class AutomaticPairExecutionSupervisor {
         this.status.entryPricePusd = entryPrice;
         this.status.plannedCostPusd = roundToCents(entryPrice * matched);
         this.status.remainingShares = matched;
-        this.status.takeProfitPricePusd = roundToCents(entryPrice + TAKE_PROFIT_INCREMENT_PUSD);
+        this.status.takeProfitPricePusd = roundToCents(entryPrice + EXIT_TRIGGER_PRICE_OFFSET_PUSD);
         this.status.unresolvedOrder = false;
         this.positionConfirmed = true;
         this.recordExecutionJournal("POSITION");
-        this.setState("WAITING_FOR_TAKE_PROFIT", `${this.status.side} entry filled; waiting for a +2¢ per-share take-profit.`);
+        this.setState("WAITING_FOR_TAKE_PROFIT", `${this.status.side} entry filled at ${entryPrice.toFixed(2)}; sell trigger is entry price + 0.05 pUSD (${this.status.takeProfitPricePusd.toFixed(2)}).`);
         return;
       }
       if (matched === 0 && isTerminal(status)) {
         this.status.unresolvedOrder = false;
         clearExecutionJournal();
         this.clearExecution();
-        this.scheduleCooldown("The FOK entry terminated with zero matched quantity.");
+        this.scheduleCooldown("The FAK entry terminated with zero matched quantity.");
         return;
       }
       this.status.unresolvedOrder = true;
@@ -608,7 +611,7 @@ export class AutomaticPairExecutionSupervisor {
       return;
     }
     if (this.retryAfterAt > Date.now()) {
-      this.setState("EXIT_RETRYING", "Exit retry cooldown is active; the active position remains protected from new entries.");
+      this.setState("EXIT_RETRYING", "Exit retry cooldown is active; remaining shares stay protected and will be sold until the position is zero.");
       return;
     }
     const bestBid = this.status.side === "UP" ? candidate.quotes.yesBestBid : candidate.quotes.noBestBid;
@@ -616,40 +619,38 @@ export class AutomaticPairExecutionSupervisor {
       this.setState(
         this.status.exitTriggered ? "EXIT_RETRYING" : "WAITING_FOR_TAKE_PROFIT",
         this.status.exitTriggered
-          ? "Waiting for a fresh executable bid while retrying the active exit."
-          : "Waiting for the selected token to reach the +2¢ take-profit price.",
+          ? "Waiting for a fresh executable bid; unsold shares will keep retrying until the position is zero."
+          : "Waiting for the selected token to reach the entry price + 0.05 pUSD sell trigger.",
       );
       return;
     }
     const target = this.status.takeProfitPricePusd;
     if (target === null) return;
+    // Once the target has been reached, use the live best bid as a marketable
+    // FAK price. FAK executes immediately against available bids and cancels
+    // anything it cannot fill; retries re-read the current bid instead of
+    // waiting for the old target/floor to return.
     if (!this.status.exitTriggered && bestBid < target) {
-      this.setState("WAITING_FOR_TAKE_PROFIT", `Waiting for ${this.status.side} bid to reach ${target.toFixed(2)} (+2¢).`);
-      return;
-    }
-    const sellFloor = this.status.exitSellFloorPusd ?? roundToCents(
-      Math.min(0.99, Math.ceil((target * (1 - MAX_EXIT_SLIPPAGE_FRACTION) - Number.EPSILON) * 100) / 100),
-    );
-    if (bestBid < sellFloor) {
-      this.setState("EXIT_RETRYING", `Take-profit triggered; waiting for a bid within the 1% exit-slippage limit.`);
+      this.setState("WAITING_FOR_TAKE_PROFIT", `Waiting for ${this.status.side} bid to reach the ${target.toFixed(2)} sell trigger (entry + 0.05 pUSD).`);
       return;
     }
     this.status.exitTriggered = true;
-    this.status.exitSellFloorPusd = sellFloor;
-    await this.submitExit(sellFloor);
+    const marketSellPrice = roundToCents(bestBid);
+    this.status.exitSellFloorPusd = marketSellPrice;
+    await this.submitExit(marketSellPrice);
   }
 
-  private async submitExit(sellFloor: number): Promise<void> {
+  private async submitExit(marketSellPrice: number): Promise<void> {
     if (!this.tokenId || !this.status.side || !this.status.remainingShares || this.status.remainingShares <= 0) return;
     this.status.lastExitError = null;
     this.status.unresolvedOrder = false;
-    this.setState("EXITING", `Selling ${this.status.side} at the +2¢ take-profit with a maximum 1% slippage floor.`);
+    this.setState("EXITING", `Selling ${this.status.side} immediately with a market-style FAK at the live best bid.`);
     try {
       this.recordExecutionJournal("EXITING");
       const response = await this.callHelper("submit_fak_sell", {
         tokenId: this.tokenId,
         leg: this.status.side,
-        price: sellFloor,
+        price: marketSellPrice,
         size: this.status.remainingShares,
       });
       const orderId = response.orders?.[0]?.orderId ?? null;
@@ -667,7 +668,7 @@ export class AutomaticPairExecutionSupervisor {
       this.status.lastExitError = error instanceof Error ? error.message.slice(0, 180) : "Exit helper failed.";
       this.status.unresolvedOrder = false;
       this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-      this.setState("EXIT_RETRYING", "Exit result is unknown; new entries are paused and the sell will be retried.");
+      this.setState("EXIT_RETRYING", "Exit result is unknown; new entries are paused and unsold shares will keep retrying until the position is zero.");
     }
   }
 
@@ -683,7 +684,7 @@ export class AutomaticPairExecutionSupervisor {
         this.status.lastExitError = "Exit order status is temporarily unavailable.";
         this.status.unresolvedOrder = false;
         this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-        this.setState("EXIT_RETRYING", "Exit result is unknown; retrying status and sale without entering a new trade.");
+        this.setState("EXIT_RETRYING", "Exit result is unknown; retrying status and sale until all remaining shares are cleared.");
         return;
       }
       const matched = finiteNumber(order.sizeMatched) ?? 0;
@@ -701,7 +702,7 @@ export class AutomaticPairExecutionSupervisor {
         this.tokenId = null;
         this.entryLimitPrice = null;
         this.positionConfirmed = false;
-        this.setState("FILLED", "Position fully sold at the +2¢ take-profit target.");
+        this.setState("FILLED", "Position fully sold after the entry + 0.05 pUSD sell trigger.");
         return;
       }
       this.status.exitOrderId = null;
@@ -709,12 +710,12 @@ export class AutomaticPairExecutionSupervisor {
       this.status.lastExitError = isTerminal(status) ? `Exit ${status.toLowerCase()} with ${this.status.remainingShares} shares remaining.` : null;
       this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
       this.recordExecutionJournal("EXITING");
-      this.setState("EXIT_RETRYING", `Exit incomplete (${status}); ${this.status.remainingShares} shares remain and will be retried.`);
+      this.setState("EXIT_RETRYING", `Exit incomplete (${status}); ${this.status.remainingShares} shares remain and will keep retrying until the position is zero.`);
     } catch (error) {
       this.status.lastExitError = error instanceof Error ? error.message.slice(0, 180) : "Exit status lookup failed.";
       this.status.unresolvedOrder = false;
       this.retryAfterAt = Date.now() + EXIT_RETRY_MS;
-      this.setState("EXIT_RETRYING", "Exit status is unknown; retrying without HALTED and without new entries.");
+      this.setState("EXIT_RETRYING", "Exit status is unknown; retrying until all remaining shares are cleared, without new entries.");
     } finally {
       this.reconciling = false;
     }
@@ -782,7 +783,7 @@ export class AutomaticPairExecutionSupervisor {
   }
 
   private async callHelper(
-    action: "submit_fok_buy" | "submit_fak_sell" | "get_orders",
+    action: "submit_fak_buy" | "submit_fak_sell" | "get_orders",
     payload: Record<string, unknown>,
   ): Promise<HelperResult & OrderStatusResult> {
     const python = executionPython();

@@ -260,10 +260,11 @@ components:
           type: object
           properties:
             priceUsd: { type: [number, "null"] }
+            momentum1sPct: { type: [number, "null"] }
             change60sPct: { type: [number, "null"] }
             lastEventAt: { type: [string, "null"], format: date-time }
             connected: { type: boolean }
-          required: [priceUsd, change60sPct, lastEventAt, connected]
+          required: [priceUsd, momentum1sPct, change60sPct, lastEventAt, connected]
         quotes:
           type: object
           properties:
@@ -331,7 +332,7 @@ components:
       properties:
         mode:
           type: string
-          enum: [CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK]
+          enum: [CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK]
         enabled:
           type: boolean
         armed:

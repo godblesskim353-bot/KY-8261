@@ -82,6 +82,8 @@ export type PolymarketLiveSnapshotSpot = {
   /** @nullable */
   priceUsd: number | null;
   /** @nullable */
+  momentum1sPct: number | null;
+  /** @nullable */
   change60sPct: number | null;
   /** @nullable */
   lastEventAt: string | null;
@@ -223,7 +225,7 @@ export type PolymarketExecutionMode = typeof PolymarketExecutionMode[keyof typeo
 
 
 export const PolymarketExecutionMode = {
-  CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK: 'CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK',
+  CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK: 'CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK',
 } as const;
 
 export type PolymarketExecutionState = typeof PolymarketExecutionState[keyof typeof PolymarketExecutionState];

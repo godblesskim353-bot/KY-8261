@@ -3,25 +3,21 @@ import type { AutomaticPairExecutionStatus, PairExecutionCandidate } from "./aut
 /**
  * This module is purely observational: it never influences trading decisions.
  * It only watches the same read-only candidate/status data the execution
- * supervisor already produces and records what it sees, so "no changes to
- * anything else" (existing arm/pause/edge/FOK logic) stays true.
+ * supervisor already produces and records what it sees.
  *
  * This threshold matches the live trading gate's combined-ask ceiling
  * (MAX_COMBINED_ASK in automatic-pair-execution.ts). It used to be a looser
- * 0.96 "just for visibility," but that left every real submission attempt
- * between 0.96 and 0.99 completely unlogged -- exactly the range where
- * genuine FOK submissions were failing with no visible record of why. Keep
- * this equal to MAX_COMBINED_ASK so every attempt the live gate would ever
+ * Keep this equal to MAX_COMBINED_ASK so every attempt the live gate would
  * allow is also captured here.
  */
-export const OPPORTUNITY_LOG_THRESHOLD_PUSD = 0.99;
+export const OPPORTUNITY_LOG_THRESHOLD_PUSD = 1;
 
 const MAX_LOG_ENTRIES = 300;
 // Worst-case round trip for one submission attempt: the CLOB helper process
 // has a 20s execFile timeout (see automatic-pair-execution.ts callHelper),
 // plus a little margin for the reconciliation call that follows a fill.
 const OUTCOME_GRACE_MS = 25_000;
-const REJECTION_REASON_PATTERN = /FOK|leg|lifecycle/i;
+const REJECTION_REASON_PATTERN = /FAK|leg|lifecycle/i;
 
 export type OpportunityOutcome = "OPEN" | "EXECUTED" | "NOT_EXECUTED";
 
@@ -156,7 +152,7 @@ export class OpportunityLogStore {
   }
 
   /**
-   * Polymarket's FOK response only reports accepted/not-accepted per leg --
+   * Polymarket's FAK response only reports accepted/not-accepted per leg --
    * it never explains *why* a leg was rejected. This is a best-effort,
    * clearly-labelled inference (not a confirmed cause) from comparing the
    * ask price observed when the opportunity opened to the price observed

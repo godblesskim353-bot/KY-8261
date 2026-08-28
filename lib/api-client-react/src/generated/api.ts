@@ -300,7 +300,7 @@ export const getStopPolymarketExecutionUrl = () => {
 }
 
 /**
- * @summary Activate the server-side two-leg execution kill switch
+ * @summary Activate the server-side directional execution kill switch
  */
 export const stopPolymarketExecution = async ( options?: Parameters<typeof customFetch>[1]): Promise<PolymarketExecution> => {
 
@@ -349,7 +349,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type StopPolymarketExecutionMutationError = ErrorType<unknown>
 
     /**
- * @summary Activate the server-side two-leg execution kill switch
+ * @summary Activate the server-side directional execution kill switch
  */
 export const useStopPolymarketExecution = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof stopPolymarketExecution>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}

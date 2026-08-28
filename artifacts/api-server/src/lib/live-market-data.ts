@@ -18,7 +18,7 @@ import { OpportunityLogStore, OPPORTUNITY_LOG_THRESHOLD_PUSD, type OpportunityLo
 
 const execFileAsync = promisify(execFile);
 const CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
-const BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@ticker";
+const BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade";
 const POSITIONS_URL = "https://data-api.polymarket.com/positions";
 const GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets";
 const FRESHNESS_MS = 8_000;
@@ -65,6 +65,7 @@ export type LiveMarketSnapshot = {
   };
   spot: {
     priceUsd: number | null;
+    momentum1sPct: number | null;
     change60sPct: number | null;
     lastEventAt: string | null;
     connected: boolean;
@@ -642,22 +643,15 @@ class LiveMarketDataSupervisor {
     const quotesFresh = Boolean(
       yes &&
         no &&
-        yesBid &&
-        noBid &&
         isFresh(this.clobAt) &&
         isFresh(this.spotAt),
     );
     const combinedAsk = yes && no ? yes.price + no.price : null;
     const commonDepth = yes && no ? Math.min(yes.size, no.size) : null;
     const edge = combinedAsk === null ? null : 1 - combinedAsk;
-    const spotWindow = this.spotHistory.find(
-      (point) => point.at >= Date.now() - 60_000,
-    );
-    const change60sPct =
-      this.spot !== null && spotWindow && spotWindow.price > 0
-        ? ((this.spot - spotWindow.price) / spotWindow.price) * 100
-        : null;
-    const signal = this.directionSignal(change60sPct);
+    const momentum1sPct = this.spotChangePct(1_000);
+    const change60sPct = this.spotChangePct(60_000);
+    const signal = this.directionSignal(momentum1sPct);
     const balance = this.wallet.balancePusd;
     const compound =
       balance !== null && commonDepth !== null && yes && no && quotesFresh
@@ -696,6 +690,7 @@ class LiveMarketDataSupervisor {
       },
       spot: {
         priceUsd: this.spot,
+        momentum1sPct,
         change60sPct,
         lastEventAt: asIso(this.spotAt),
         connected: this.binanceConnected,
@@ -766,19 +761,24 @@ class LiveMarketDataSupervisor {
     return { thresholdPusd: OPPORTUNITY_LOG_THRESHOLD_PUSD, entries: this.opportunityLog.list() };
   }
 
+  private spotChangePct(windowMs: number): number | null {
+    const windowStart = this.spotHistory.find(
+      (point) => point.at >= Date.now() - windowMs,
+    );
+    return this.spot !== null && windowStart && windowStart.price > 0
+      ? ((this.spot - windowStart.price) / windowStart.price) * 100
+      : null;
+  }
+
   private executionCandidate(): PairExecutionCandidate {
     const market = this.activeMarket;
     const yes = market.yesTokenId ? this.bestAsk(market.yesTokenId) : null;
     const no = market.noTokenId ? this.bestAsk(market.noTokenId) : null;
     const yesBid = market.yesTokenId ? this.bestBid(market.yesTokenId) : null;
     const noBid = market.noTokenId ? this.bestBid(market.noTokenId) : null;
-    const spotWindow = this.spotHistory.find((point) => point.at >= Date.now() - 60_000);
-    const change60sPct =
-      this.spot !== null && spotWindow && spotWindow.price > 0
-        ? ((this.spot - spotWindow.price) / spotWindow.price) * 100
-        : null;
+    const momentum1sPct = this.spotChangePct(1_000);
     const fresh =
-      Boolean(yes && no && yesBid && noBid) &&
+      Boolean(yes && no) &&
       this.clobConnected &&
       isFresh(this.clobAt) &&
       isFresh(this.spotAt);
@@ -807,7 +807,7 @@ class LiveMarketDataSupervisor {
         combinedAsk: yes && no ? yes.price + no.price : null,
         fresh,
       },
-      signal: this.directionSignal(change60sPct),
+      signal: this.directionSignal(momentum1sPct),
       walletBalancePusd: this.wallet.balancePusd,
       inventory: {
         yesShares: this.inventory.yes,
@@ -884,7 +884,7 @@ class LiveMarketDataSupervisor {
       (message) => {
         try {
           const payload = JSON.parse(message) as Record<string, unknown>;
-          const price = numberOrNull(payload.c);
+          const price = numberOrNull(payload.p ?? payload.c);
           const eventAt = numberOrNull(payload.E) ?? Date.now();
           if (price === null || price <= 0) return;
           this.spot = price;
@@ -894,6 +894,7 @@ class LiveMarketDataSupervisor {
             (point) => point.at >= Date.now() - 65_000,
           );
           this.sequence += 1;
+          void this.execution.evaluate(this.executionCandidate());
         } catch {
           logger.warn("Could not parse Binance ticker message");
         }
@@ -1059,74 +1060,66 @@ class LiveMarketDataSupervisor {
     return Number(depth.toFixed(4));
   }
 
-  private directionSignal(change60sPct: number | null): LiveMarketSnapshot["signal"] {
+  private directionSignal(momentum1sPct: number | null): LiveMarketSnapshot["signal"] {
     const market = this.activeMarket;
     const yesBidDepth = market.yesTokenId ? this.nearDepth(market.yesTokenId, "BID") : null;
     const yesAskDepth = market.yesTokenId ? this.nearDepth(market.yesTokenId, "ASK") : null;
     const noBidDepth = market.noTokenId ? this.nearDepth(market.noTokenId, "BID") : null;
     const noAskDepth = market.noTokenId ? this.nearDepth(market.noTokenId, "ASK") : null;
     const btcDirection: Direction | null =
-      change60sPct === null || Math.abs(change60sPct) < 0.002
+      momentum1sPct === null || momentum1sPct === 0
         ? null
-        : change60sPct > 0
+        : momentum1sPct > 0
           ? "UP"
           : "DOWN";
+    let bookDirection: Direction | null = null;
     if (
-      yesBidDepth === null ||
-      yesAskDepth === null ||
-      noBidDepth === null ||
-      noAskDepth === null
+      yesBidDepth !== null &&
+      yesAskDepth !== null &&
+      noBidDepth !== null &&
+      noAskDepth !== null
     ) {
-      return {
-        btcDirection,
-        bookDirection: null,
-        selectedDirection: null,
-        confirmed: false,
-        reason: "Waiting for complete Up/Down bid and ask depth.",
-      };
+      const upPressure = yesBidDepth / Math.max(yesAskDepth, 0.0001);
+      const downPressure = noBidDepth / Math.max(noAskDepth, 0.0001);
+      bookDirection =
+        upPressure >= downPressure * 1.15
+          ? "UP"
+          : downPressure >= upPressure * 1.15
+            ? "DOWN"
+            : null;
     }
 
-    const upPressure = yesBidDepth / Math.max(yesAskDepth, 0.0001);
-    const downPressure = noBidDepth / Math.max(noAskDepth, 0.0001);
-    const bookDirection: Direction | null =
-      upPressure >= downPressure * 1.15
-        ? "UP"
-        : downPressure >= upPressure * 1.15
-          ? "DOWN"
-          : null;
-    if (!btcDirection) {
+    const selectedDirection = btcDirection ?? bookDirection;
+    if (!selectedDirection) {
+      const bookIncomplete =
+        yesBidDepth === null ||
+        yesAskDepth === null ||
+        noBidDepth === null ||
+        noAskDepth === null;
       return {
         btcDirection: null,
         bookDirection,
         selectedDirection: null,
         confirmed: false,
-        reason: "The BTC 60-second direction is too close to flat to select a side.",
+        reason: bookIncomplete
+          ? "Waiting for a non-flat BTC 1-second move or complete Up/Down orderbook imbalance."
+          : "BTC 1-second momentum is flat and Polymarket orderbook imbalance is unclear.",
       };
     }
-    if (!bookDirection) {
-      return {
-        btcDirection,
-        bookDirection: null,
-        selectedDirection: null,
-        confirmed: false,
-        reason: "Polymarket near-book pressure does not clearly favour Up or Down.",
-      };
-    }
-    if (btcDirection !== bookDirection) {
-      return {
-        btcDirection,
-        bookDirection,
-        selectedDirection: null,
-        confirmed: false,
-        reason: `BTC points ${btcDirection}, but Polymarket orderbook pressure points ${bookDirection}; skipping the trade.`,
-      };
-    }
+
+    const reason = btcDirection
+      ? bookDirection === btcDirection
+        ? `BTC 1-second momentum and Polymarket imbalance both point ${btcDirection}.`
+        : bookDirection
+          ? `BTC 1-second momentum points ${btcDirection}; it takes priority over conflicting ${bookDirection} book imbalance.`
+          : `BTC 1-second momentum points ${btcDirection}; using the breakout direction immediately.`
+      : `BTC 1-second momentum is flat; Polymarket orderbook imbalance selects ${bookDirection}.`;
     return {
       btcDirection,
       bookDirection,
-      selectedDirection: btcDirection,
+      selectedDirection,
       confirmed: true,
-      reason: `BTC direction and Polymarket orderbook pressure both confirm ${btcDirection}.`,
+      reason,
     };
   }
 

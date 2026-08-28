@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Single-leg Polymarket CLOB bridge for the directional BTC bot.
 
-The Node supervisor uses this bridge for one FOK BUY and repeated FAK SELL
-orders. It intentionally contains no pair submission, Merge, or missing-leg
-recovery path. stdout is a JSON protocol; diagnostics stay on stderr.
+The Node supervisor uses this bridge for one market-style FAK BUY and repeated
+market-style FAK SELL orders at the live best bid. It intentionally contains no pair
+submission, Merge, or missing-leg recovery path. stdout is a JSON protocol;
+diagnostics stay on stderr.
 """
 
 from __future__ import annotations
@@ -203,12 +204,12 @@ def submit_single_order(value: dict[str, Any], *, side: str, order_type: str, su
     )
 
 
-def submit_fok_buy(value: dict[str, Any]) -> None:
+def submit_fak_buy(value: dict[str, Any]) -> None:
     submit_single_order(
         value,
         side="BUY",
-        order_type=OrderType.FOK,
-        success_code="FOK_SINGLE_BUY_ACCEPTED",
+        order_type=OrderType.FAK,
+        success_code="FAK_SINGLE_BUY_ACCEPTED",
     )
 
 
@@ -279,8 +280,8 @@ def main() -> None:
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     value = payload()
     try:
-        if action == "submit_fok_buy":
-            submit_fok_buy(value)
+        if action == "submit_fak_buy":
+            submit_fak_buy(value)
         elif action == "submit_fak_sell":
             submit_fak_sell(value)
         elif action == "cancel_orders":

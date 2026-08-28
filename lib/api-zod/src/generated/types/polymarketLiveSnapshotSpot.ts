@@ -10,6 +10,8 @@ export type PolymarketLiveSnapshotSpot = {
   /** @nullable */
   priceUsd: number | null;
   /** @nullable */
+  momentum1sPct: number | null;
+  /** @nullable */
   change60sPct: number | null;
   /** @nullable */
   lastEventAt: Date | null;

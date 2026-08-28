@@ -81,7 +81,7 @@ router.get("/polymarket/status", async (_req, res) => {
     executionAvailable,
     message: proxyReachable && executionAvailable
       ? liveTradingEnabled
-        ? "Directional single-leg FOK entry and +2¢ FAK exit supervision are available."
+        ? "Directional single-leg FAK entry and price-triggered FAK exits are available: sell trigger = entry price + 0.05 pUSD."
         : "Directional single-leg execution is installed but disabled by LIVE_TRADING_ENABLED."
       : "The proxy guard is closed. Live requests are blocked and the dashboard remains in mock mode.",
   });

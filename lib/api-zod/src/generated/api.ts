@@ -62,6 +62,7 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
 }),
   "spot": zod.object({
   "priceUsd": zod.number().nullable(),
+  "momentum1sPct": zod.number().nullable(),
   "change60sPct": zod.number().nullable(),
   "lastEventAt": zod.coerce.date().nullable(),
   "connected": zod.boolean()
@@ -116,7 +117,7 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
   "reason": zod.string()
 }),
   "execution": zod.object({
-  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
   "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
@@ -145,10 +146,10 @@ export const GetPolymarketLiveSnapshotResponse = zod.object({
 
 
 /**
- * @summary Activate the server-side two-leg execution kill switch
+ * @summary Activate the server-side directional execution kill switch
  */
 export const StopPolymarketExecutionResponse = zod.object({
-  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
   "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
@@ -179,7 +180,7 @@ export const StopPolymarketExecutionResponse = zod.object({
  * @summary Arm automatic protected pair execution from the control room
  */
 export const ArmPolymarketExecutionResponse = zod.object({
-  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
   "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
@@ -210,7 +211,7 @@ export const ArmPolymarketExecutionResponse = zod.object({
  * @summary Pause automatic protected pair execution
  */
 export const PausePolymarketExecutionResponse = zod.object({
-  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FOK_FAK']),
+  "mode": zod.enum(['CLOB_SINGLE_LEG_DIRECTIONAL_FAK_FAK']),
   "enabled": zod.boolean(),
   "armed": zod.boolean(),
   "state": zod.enum(['DISABLED', 'PAUSED', 'WAITING_FOR_MARKET', 'ARMED', 'SUBMITTING', 'VERIFYING', 'WAITING_FOR_TAKE_PROFIT', 'EXITING', 'EXIT_RETRYING', 'FILLED', 'HALTED']),
