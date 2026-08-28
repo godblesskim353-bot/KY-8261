@@ -4,8 +4,10 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
+  ENTRY_PRICE_AGGRESSION_PUSD,
   MAX_ENTRY_PRICE_PUSD,
   MIN_ENTRY_PRICE_PUSD,
+  calculateEntryLimitPrice,
   isEntryPriceWithinBand,
 } from "./entry-price-band";
 import { logger } from "./logger";
@@ -401,12 +403,14 @@ export class AutomaticPairExecutionSupervisor {
     const side = candidate.signal.selectedDirection;
     const ask = side === "UP" ? candidate.quotes.yesBestAsk : candidate.quotes.noBestAsk;
     if (!side || ask === null) return;
-    const shares = this.calculateShares(candidate, ask);
+    const entryLimitPrice = calculateEntryLimitPrice(ask);
+    if (entryLimitPrice === null) return;
+    const shares = this.calculateShares(candidate, entryLimitPrice);
     if (shares === null) {
       this.setState("WAITING_FOR_MARKET", "The verified wallet balance cannot fund a valid 10% single-leg order.");
       return;
     }
-    await this.submitEntry(candidate, side, ask, shares);
+    await this.submitEntry(candidate, side, ask, entryLimitPrice, shares);
   }
 
   async emergencyStop(): Promise<AutomaticPairExecutionStatus> {
@@ -502,15 +506,16 @@ export class AutomaticPairExecutionSupervisor {
   private async submitEntry(
     candidate: PairExecutionCandidate,
     side: Direction,
-    ask: number,
+    observedAsk: number,
+    entryLimitPrice: number,
     shares: number,
   ): Promise<void> {
     const tokenId = side === "UP" ? candidate.market.yesTokenId : candidate.market.noTokenId;
     if (!tokenId || !candidate.market.conditionId) return;
-    if (!isEntryPriceWithinBand(ask)) {
+    if (!isEntryPriceWithinBand(observedAsk) || !isEntryPriceWithinBand(entryLimitPrice)) {
       this.setState(
         "WAITING_FOR_MARKET",
-        `Selected ${side} ask must be between ${MIN_ENTRY_PRICE_PUSD.toFixed(2)} and ${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD; no entry was submitted.`,
+        `Selected ${side} ask and BUY limit must stay between ${MIN_ENTRY_PRICE_PUSD.toFixed(2)} and ${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD; no entry was submitted.`,
       );
       return;
     }
@@ -518,9 +523,9 @@ export class AutomaticPairExecutionSupervisor {
     this.status.conditionId = candidate.market.conditionId;
     this.status.side = side;
     this.status.plannedShares = shares;
-    this.status.plannedCostPusd = roundToCents(shares * ask);
-    this.status.entryPricePusd = ask;
-    this.status.takeProfitPricePusd = roundToCents(ask + EXIT_TRIGGER_PRICE_OFFSET_PUSD);
+    this.status.plannedCostPusd = roundToCents(shares * entryLimitPrice);
+    this.status.entryPricePusd = entryLimitPrice;
+    this.status.takeProfitPricePusd = roundToCents(entryLimitPrice + EXIT_TRIGGER_PRICE_OFFSET_PUSD);
     this.status.remainingShares = shares;
     this.status.directionReason = candidate.signal.reason;
     this.status.entryCombinedAskPusd = candidate.quotes.combinedAsk;
@@ -532,17 +537,17 @@ export class AutomaticPairExecutionSupervisor {
     this.status.exitTriggered = false;
     this.status.exitSellFloorPusd = null;
     this.tokenId = tokenId;
-    this.entryLimitPrice = ask;
+    this.entryLimitPrice = entryLimitPrice;
     this.setState(
       "SUBMITTING",
-      `Submitting one ${side} market-style FAK buy with a ${MIN_ENTRY_PRICE_PUSD.toFixed(2)}–${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD entry band and <100¢ mispricing gate.`,
+      `Submitting one ${side} market-style FAK buy at ${entryLimitPrice.toFixed(2)} pUSD (observed ask ${observedAsk.toFixed(2)} + ${ENTRY_PRICE_AGGRESSION_PUSD.toFixed(2)}, capped at ${MAX_ENTRY_PRICE_PUSD.toFixed(2)}) with <100¢ mispricing gate.`,
     );
     try {
       this.recordExecutionJournal("ENTRY");
       const response = await this.callHelper("submit_fak_buy", {
         tokenId,
         leg: side,
-        price: ask,
+        price: entryLimitPrice,
         size: shares,
       });
       const orderId = response.orders?.[0]?.orderId ?? null;

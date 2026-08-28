@@ -29,7 +29,7 @@ const queryClient = new QueryClient();
 const EDGE_TARGET = 0;
 const COMBINED_ASK_CEILING = 1;
 const ENTRY_PRICE_MIN = 0.4;
-const ENTRY_PRICE_MAX = 0.75;
+const ENTRY_PRICE_MAX = 0.82;
 const DEPTH_TARGET = 100;
 const INVENTORY_BOUND = 250;
 const remoteApiBase = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -143,13 +143,13 @@ function RiskPanel({ data }: { data?: PolymarketLiveSnapshot }) {
   const selectedEntryAskInBand = selectedEntryAsk !== null && selectedEntryAsk !== undefined && selectedEntryAsk >= ENTRY_PRICE_MIN && selectedEntryAsk <= ENTRY_PRICE_MAX;
   const rows = [
     ['Combined ask ceiling', '< 100.0¢', formatCents(q?.combinedAsk), q?.combinedAsk !== null && q?.combinedAsk !== undefined && q.combinedAsk < COMBINED_ASK_CEILING],
-    ['Selected entry ask', '40–75¢', formatCents(selectedEntryAsk), selectedEntryAskInBand],
+    ['Selected entry ask', '40–82¢', formatCents(selectedEntryAsk), selectedEntryAskInBand],
     ['Positive mispricing', '> 0.0¢', q?.edge === null || q?.edge === undefined ? '—' : `${formatSigned(q.edge * 100, 2)}¢`, q?.edge !== null && q?.edge !== undefined && q.edge > EDGE_TARGET],
     ['Common depth', '≥ 100', formatShares(q?.commonDepth), q?.commonDepth !== null && q?.commonDepth !== undefined && q.commonDepth >= DEPTH_TARGET],
     ['Inventory bound', '± 250', formatSigned(i?.netShares, 2), i?.netShares !== null && i?.netShares !== undefined && Math.abs(i.netShares) <= INVENTORY_BOUND],
     ['Order book freshness', '< 8 sec', q?.fresh ? 'fresh' : 'waiting', Boolean(q?.fresh)],
   ] as const;
-  return <section id="risk-panel" className="panel rounded-xl p-5"><SectionHeader eyebrow="pre-trade gate" title="Risk & strategy" action={<Badge tone={data?.ready ? 'teal' : 'amber'} pulse={Boolean(data?.ready)}>{data?.ready ? 'observing live' : 'not ready'}</Badge>} /><div className={`mb-4 flex items-center gap-3 rounded-lg border px-3 py-2.5 ${data?.ready ? 'border-[#b6ded1] bg-[#e8f6f0]' : 'border-[#f0d59a] bg-[#fff8e7]'}`}><span className={`grid h-7 w-7 place-items-center rounded-full ${data?.ready ? 'bg-[#bee5d5] text-[#176856]' : 'bg-[#f4deab] text-[#9b6b1b]'}`}>{data?.ready ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}</span><div><div className={`text-[11px] font-bold ${data?.ready ? 'text-[#176856]' : 'text-[#9b6b1b]'}`}>{data?.ready ? 'Live data checks passing' : 'Live data checks waiting'}</div><div className="text-[10px] text-[#70817b]">Combined ask &lt;100¢ and selected entry ask 40–75¢ open the gate; BTC 1-second momentum takes priority, with CLOB imbalance as fallback; sell trigger = entry price + 0.05 pUSD (0.65 → 0.70), then FAK exits at the live best bid.</div></div></div><div className="space-y-2.5">{rows.map(([name, limit, current, pass]) => <div key={name} className="flex items-center justify-between gap-3 text-[11px]"><span className="font-medium text-[#53625f]">{name}</span><span className="ml-auto font-mono text-[10px] text-[#8b9691]">{limit}</span><span className={`min-w-[54px] text-right font-mono font-medium ${pass ? 'text-[#34474a]' : 'text-[#b94c42]'}`}>{current}</span><span className={`h-1.5 w-1.5 rounded-full ${pass ? 'bg-[#16826c]' : 'bg-[#c95d51]'}`} /></div>)}</div></section>;
+  return <section id="risk-panel" className="panel rounded-xl p-5"><SectionHeader eyebrow="pre-trade gate" title="Risk & strategy" action={<Badge tone={data?.ready ? 'teal' : 'amber'} pulse={Boolean(data?.ready)}>{data?.ready ? 'observing live' : 'not ready'}</Badge>} /><div className={`mb-4 flex items-center gap-3 rounded-lg border px-3 py-2.5 ${data?.ready ? 'border-[#b6ded1] bg-[#e8f6f0]' : 'border-[#f0d59a] bg-[#fff8e7]'}`}><span className={`grid h-7 w-7 place-items-center rounded-full ${data?.ready ? 'bg-[#bee5d5] text-[#176856]' : 'bg-[#f4deab] text-[#9b6b1b]'}`}>{data?.ready ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}</span><div><div className={`text-[11px] font-bold ${data?.ready ? 'text-[#176856]' : 'text-[#9b6b1b]'}`}>{data?.ready ? 'Live data checks passing' : 'Live data checks waiting'}</div><div className="text-[10px] text-[#70817b]">Combined ask &lt;100¢ and selected entry ask 40–82¢ open the gate; the BUY limit adds 2¢ and is capped at 82¢; BTC 1-second momentum takes priority, with CLOB imbalance as fallback; sell trigger = entry price + 0.05 pUSD (0.65 → 0.70), then FAK exits at the live best bid.</div></div></div><div className="space-y-2.5">{rows.map(([name, limit, current, pass]) => <div key={name} className="flex items-center justify-between gap-3 text-[11px]"><span className="font-medium text-[#53625f]">{name}</span><span className="ml-auto font-mono text-[10px] text-[#8b9691]">{limit}</span><span className={`min-w-[54px] text-right font-mono font-medium ${pass ? 'text-[#34474a]' : 'text-[#b94c42]'}`}>{current}</span><span className={`h-1.5 w-1.5 rounded-full ${pass ? 'bg-[#16826c]' : 'bg-[#c95d51]'}`} /></div>)}</div></section>;
 }
 
 function InventoryPanel({ data }: { data?: PolymarketLiveSnapshot }) {
@@ -194,7 +194,7 @@ function ExecutionPanel({ data }: { data?: PolymarketLiveSnapshot }) {
       </div>
     </div>
     <div className={`mt-3 rounded-lg border px-3 py-2 text-[10px] ${execution?.lastExitError ? 'border-[#f0b2aa] bg-[#ffe0dc] text-[#9e342b]' : 'border-[#d6e7df] bg-[#eaf6f1] text-[#387163]'}`}>
-       {execution?.lastExitError ?? 'Entry requires combined ask <100¢, selected entry ask 40–75¢, plus BTC 1-second momentum or CLOB imbalance. Sell trigger = entry price + 0.05 pUSD (0.65 → 0.70); FAK exits use the live best bid and retry until the position is zero.'}
+       {execution?.lastExitError ?? 'Entry requires combined ask <100¢, selected entry ask 40–82¢, and BUY limit up to ask + 0.02 capped at 0.82, plus BTC 1-second momentum or CLOB imbalance. Sell trigger = entry price + 0.05 pUSD (0.65 → 0.70); FAK exits use the live best bid and retry until the position is zero.'}
     </div>
     <button type="button" onClick={toggleClick} disabled={busy || (!execution?.enabled && !autoRunning) || halted} className={`mt-3 w-full rounded-lg px-3 py-3 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${autoRunning ? 'border border-[#d9c28a] bg-[#fff8e7] text-[#8d661e]' : 'border border-[#16826c] bg-[#e8f6f0] text-[#176856]'}`}>{busy ? 'UPDATING…' : toggleLabel}</button>
   </section>;
