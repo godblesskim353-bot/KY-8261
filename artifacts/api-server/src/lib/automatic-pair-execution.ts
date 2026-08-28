@@ -3,6 +3,11 @@ import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import {
+  MAX_ENTRY_PRICE_PUSD,
+  MIN_ENTRY_PRICE_PUSD,
+  isEntryPriceWithinBand,
+} from "./entry-price-band";
 import { logger } from "./logger";
 
 const execFileAsync = promisify(execFile);
@@ -464,6 +469,9 @@ export class AutomaticPairExecutionSupervisor {
       return candidate.signal.reason;
     }
     const selectedAsk = candidate.signal.selectedDirection === "UP" ? yesBestAsk : noBestAsk;
+    if (!isEntryPriceWithinBand(selectedAsk)) {
+      return `Selected ${candidate.signal.selectedDirection} ask must be between ${MIN_ENTRY_PRICE_PUSD.toFixed(2)} and ${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD.`;
+    }
     if (selectedAsk + EXIT_TRIGGER_PRICE_OFFSET_PUSD >= 1) {
       return "Selected token's entry + 0.05 pUSD price trigger would be at or above 1.00 pUSD.";
     }
@@ -499,6 +507,13 @@ export class AutomaticPairExecutionSupervisor {
   ): Promise<void> {
     const tokenId = side === "UP" ? candidate.market.yesTokenId : candidate.market.noTokenId;
     if (!tokenId || !candidate.market.conditionId) return;
+    if (!isEntryPriceWithinBand(ask)) {
+      this.setState(
+        "WAITING_FOR_MARKET",
+        `Selected ${side} ask must be between ${MIN_ENTRY_PRICE_PUSD.toFixed(2)} and ${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD; no entry was submitted.`,
+      );
+      return;
+    }
     this.submitting = true;
     this.status.conditionId = candidate.market.conditionId;
     this.status.side = side;
@@ -518,7 +533,10 @@ export class AutomaticPairExecutionSupervisor {
     this.status.exitSellFloorPusd = null;
     this.tokenId = tokenId;
     this.entryLimitPrice = ask;
-    this.setState("SUBMITTING", `Submitting one ${side} market-style FAK buy after the <100¢ mispricing gate.`);
+    this.setState(
+      "SUBMITTING",
+      `Submitting one ${side} market-style FAK buy with a ${MIN_ENTRY_PRICE_PUSD.toFixed(2)}–${MAX_ENTRY_PRICE_PUSD.toFixed(2)} pUSD entry band and <100¢ mispricing gate.`,
+    );
     try {
       this.recordExecutionJournal("ENTRY");
       const response = await this.callHelper("submit_fak_buy", {
