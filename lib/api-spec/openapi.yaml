@@ -356,6 +356,7 @@ components:
           type: [number, "null"]
         plannedCostPusd:
           type: [number, "null"]
+          description: Actual planned cost after CLOB precision rounding; the initial entry targets a fixed 1.00 pUSD budget and never exceeds the verified wallet balance.
         entryPricePusd:
           type: [number, "null"]
         defensePricePusd:

@@ -81,7 +81,7 @@ router.get("/polymarket/status", async (_req, res) => {
     executionAvailable,
     message: proxyReachable && executionAvailable
       ? liveTradingEnabled
-        ? "Binance perpetual top-three 4x depth plus >10 BTC aggressive flow in 50 ms drives a 10% FAK entry at ask + 0.01 (0.40–0.82 cap), immediately protected by an opposite GTC defense and dual-track reconciliation."
+        ? "Binance perpetual top-three 4x depth plus >10 BTC aggressive flow in 50 ms drives a fixed 1.00 pUSD FAK entry at ask + 0.01 (0.40–0.82 cap), immediately protected by an opposite GTC defense and dual-track reconciliation."
         : "Binance-driven dual-track CLOB execution is installed but disabled by LIVE_TRADING_ENABLED."
       : "The proxy guard is closed. Live requests are blocked and the dashboard remains in mock mode.",
   });

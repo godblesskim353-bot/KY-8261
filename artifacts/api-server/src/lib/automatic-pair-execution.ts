@@ -14,7 +14,7 @@ const EXECUTION_HELPER = path.resolve(API_SERVER_DIR, "scripts/manage_clob_pair.
 const JOURNAL = process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_PATH?.trim()
   ? path.resolve(process.env.POLYMARKET_SINGLE_EXECUTION_JOURNAL_PATH.trim())
   : path.resolve(API_SERVER_DIR, ".automatic-single-execution-journal.json");
-export const WALLET_STAKE_FRACTION = 0.1;
+export const INITIAL_ENTRY_BUDGET_PUSD = 1;
 export const EXIT_TRIGGER_PRICE_OFFSET_PUSD = 0.05;
 export type Direction = "UP" | "DOWN";
 type Phase = "ENTRY" | "DEFENSE" | "TRACK_A" | "TRACK_C_ENTRY" | "TRACK_C_EXIT" | "SETTLEMENT_WAIT" | "COMPLETE";
@@ -125,8 +125,8 @@ export class AutomaticPairExecutionSupervisor {
     if (this.completed && this.completed !== c.market.conditionId) { clear(this.journalPath); this.completed = null; }
     const bad = this.entryBlock(c); if (bad) return void this.set("WAITING_FOR_MARKET", bad);
     const side = c.signal.selectedDirection!; const ask = side === "UP" ? c.quotes.yesBestAsk! : c.quotes.noBestAsk!;
-    const limit = cents(Math.min(ask + 0.01, MAX_ENTRY_PRICE_PUSD)); const shares = sharesFor(c.walletBalancePusd! * WALLET_STAKE_FRACTION, c.walletBalancePusd!, limit);
-    if (!shares) return void this.set("WAITING_FOR_MARKET", "Verified wallet cannot fund a valid 10% initial order.");
+    const limit = cents(Math.min(ask + 0.01, MAX_ENTRY_PRICE_PUSD)); const shares = sharesFor(INITIAL_ENTRY_BUDGET_PUSD, c.walletBalancePusd!, limit);
+    if (!shares) return void this.set("WAITING_FOR_MARKET", "Verified wallet cannot fund a valid fixed 1.00 pUSD initial order.");
     this.status.conditionId = c.market.conditionId; this.status.side = side; this.status.plannedShares = shares; this.status.remainingShares = shares; this.status.plannedCostPusd = cents(shares * limit); this.status.entryPricePusd = limit; this.status.directionReason = c.signal.reason; this.tokenId = side === "UP" ? c.market.yesTokenId! : c.market.noTokenId!; this.oppositeTokenId = side === "UP" ? c.market.noTokenId! : c.market.yesTokenId!; this.phase = "ENTRY"; this.persist();
     this.set("SUBMITTING", `Submitting ${side} FAK BUY at observed ask + 0.01, capped at 0.82.`);
     this.submissionId = this.newSubmissionId(); this.persist();
@@ -143,6 +143,7 @@ export class AutomaticPairExecutionSupervisor {
     const ask = c.signal.selectedDirection === "UP" ? c.quotes.yesBestAsk : c.quotes.noBestAsk;
     if (ask === null || !isEntryPriceWithinBand(ask)) return "Selected observed ask must be within the server-side 0.40–0.82 cap.";
     if (c.walletFresh === false || c.walletBalancePusd === null || c.walletBalancePusd <= 0) return "Fresh verified positive wallet balance required.";
+    if (c.walletBalancePusd < INITIAL_ENTRY_BUDGET_PUSD) return "Verified wallet must contain at least 1.00 pUSD for the fixed initial entry.";
     if (c.inventory.fresh === false || c.inventory.yesShares === null || c.inventory.noShares === null || c.inventory.yesShares > .01 || c.inventory.noShares > .01) return "Fresh zero Up/Down inventory is required.";
     return null;
   }

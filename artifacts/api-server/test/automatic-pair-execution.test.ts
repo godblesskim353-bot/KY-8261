@@ -10,7 +10,7 @@ import {
   calculateEntryLimitPrice,
   isEntryPriceWithinBand,
 } from "../src/lib/entry-price-band.ts";
-import { createAutomaticPairExecutionSupervisor, type SupervisorHelper } from "../src/lib/automatic-pair-execution.ts";
+import { createAutomaticPairExecutionSupervisor, INITIAL_ENTRY_BUDGET_PUSD, type SupervisorHelper } from "../src/lib/automatic-pair-execution.ts";
 import {
   aggressiveVolumeAfterWall,
   calculateValidBuyShares,
@@ -65,6 +65,44 @@ test("CLOB precision sizing never exceeds either supplied budget cap", () => {
   assert.ok(shares! * 0.42 <= 9.99);
   assert.equal(Number.isInteger(shares! * 10_000), true);
   assert.equal(Math.round(shares! * 0.42 * 100), 987);
+});
+
+test("initial FAK targets a fixed 1 USDC budget after CLOB rounding", async () => {
+  process.env.LIVE_TRADING_ENABLED = "true";
+  let entryPayload: Record<string, unknown> | null = null;
+  const helper: SupervisorHelper = async (action, payload) => {
+    if (action === "submit_fak_buy") {
+      entryPayload = payload;
+      return { ok: true, orders: [{ orderId: "fixed-entry" }] };
+    }
+    if (action === "get_orders") return { ok: true, orders: [{ status: "LIVE", sizeMatched: 0 }] };
+    return { ok: true, orders: [] };
+  };
+  const supervisor = createAutomaticPairExecutionSupervisor({ journalPath: journal(), helper, bridgeAvailable: true });
+  await supervisor.arm();
+  await supervisor.evaluate(candidate());
+  assert.equal(INITIAL_ENTRY_BUDGET_PUSD, 1);
+  assert.equal(entryPayload?.price, 0.61);
+  assert.equal(entryPayload?.size, 1);
+  assert.ok((entryPayload?.size as number) * (entryPayload?.price as number) <= INITIAL_ENTRY_BUDGET_PUSD);
+  assert.equal(supervisor.snapshot().plannedCostPusd, 0.61);
+});
+
+test("fixed 1 USDC entry fails closed when the verified wallet is smaller", async () => {
+  process.env.LIVE_TRADING_ENABLED = "true";
+  const actions: string[] = [];
+  const helper: SupervisorHelper = async (action) => {
+    actions.push(action);
+    return { ok: true, orders: [] };
+  };
+  const lowWalletCandidate = candidate();
+  lowWalletCandidate.walletBalancePusd = 0.99;
+  const supervisor = createAutomaticPairExecutionSupervisor({ journalPath: journal(), helper, bridgeAvailable: true });
+  await supervisor.arm();
+  await supervisor.evaluate(lowWalletCandidate);
+  assert.deepEqual(actions, []);
+  assert.equal(supervisor.snapshot().state, "WAITING_FOR_MARKET");
+  assert.match(supervisor.snapshot().reason, /at least 1\.00 pUSD/);
 });
 
 test("entry price band includes both configured boundaries", () => {

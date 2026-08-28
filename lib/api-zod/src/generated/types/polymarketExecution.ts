@@ -34,7 +34,10 @@ export interface PolymarketExecution {
   unresolvedOrder: boolean;
   /** @nullable */
   plannedShares: number | null;
-  /** @nullable */
+  /**
+     * Actual planned cost after CLOB precision rounding; the initial entry targets a fixed 1.00 pUSD budget and never exceeds the verified wallet balance.
+     * @nullable
+     */
   plannedCostPusd: number | null;
   /** @nullable */
   entryPricePusd: number | null;
